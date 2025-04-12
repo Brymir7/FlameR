@@ -1,0 +1,4 @@
+cargo:rustc-link-search=C:\Windows\System32
+cargo:rustc-link-search=C:\Program Files (x86)\AMD APP SDK\3.0\lib\x86_64
+cargo:rustc-link-search=C:\Program Files\AMD APP SDK\lib\x64
+cargo:rustc-link-lib=OpenCL

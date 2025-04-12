@@ -2,6 +2,8 @@ use crate::tensor::{Tensor, TensorOperation};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use ocl::{Buffer, Context, Device, Platform, Program, Queue};
+use std::sync::{Arc, Mutex};
 
 static BUFFER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -44,21 +46,158 @@ impl Backend for CPUBackend {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct OpenCLBackend;
+#[derive(Debug)]
+pub struct OpenCLBackend {
+    context: Context,
+    queue: Queue,
+    program: Program,
+    buffer_cache: Arc<Mutex<HashMap<usize, Buffer<f32>>>>,
+}
+
+impl Default for OpenCLBackend {
+    fn default() -> Self {
+        let platform = Platform::default();
+        let device = Device::first(platform).expect("No OpenCL device found");
+        
+        let context = Context::builder()
+            .platform(platform)
+            .devices(device)
+            .build()
+            .expect("Failed to create OpenCL context");
+            
+        let queue = Queue::new(&context, device, None)
+            .expect("Failed to create command queue");
+            
+        let program_src = r#"
+            __kernel void add(__global const float* lhs, 
+                             __global const float* rhs,
+                             __global float* result,
+                             const unsigned int len) {
+                const int gid = get_global_id(0);
+                if (gid < len) {
+                    result[gid] = lhs[gid] + rhs[gid];
+                }
+            }
+            
+            __kernel void subtract(__global const float* lhs,
+                                  __global const float* rhs,
+                                  __global float* result,
+                                  const unsigned int len) {
+                const int gid = get_global_id(0);
+                if (gid < len) {
+                    result[gid] = lhs[gid] - rhs[gid];
+                }
+            }
+            
+            __kernel void multiply(__global const float* lhs,
+                                  __global const float* rhs,
+                                  __global float* result,
+                                  const unsigned int len) {
+                const int gid = get_global_id(0);
+                if (gid < len) {
+                    result[gid] = lhs[gid] * rhs[gid];
+                }
+            }
+            
+            __kernel void divide(__global const float* lhs,
+                                __global const float* rhs,
+                                __global float* result,
+                                const unsigned int len) {
+                const int gid = get_global_id(0);
+                if (gid < len) {
+                    result[gid] = (rhs[gid] == 0.0f) ? NAN : lhs[gid] / rhs[gid];
+                }
+            }
+        "#;
+        
+        let program = Program::builder()
+            .devices(device)
+            .src(program_src)
+            .build(&context)
+            .expect("Failed to build OpenCL program");
+            
+        OpenCLBackend {
+            context,
+            queue,
+            program,
+            buffer_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
 
 impl Backend for OpenCLBackend {
-    fn add(&self, _lhs: &[f32], _rhs: &[f32]) -> Vec<f32> {
-        unimplemented!("OpenCL add not yet implemented");
+    fn add(&self, lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        self.execute_binary_op(lhs, rhs, "add")
     }
-    fn subtract(&self, _lhs: &[f32], _rhs: &[f32]) -> Vec<f32> {
-        unimplemented!("OpenCL subtract not yet implemented");
+
+    fn subtract(&self, lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        self.execute_binary_op(lhs, rhs, "subtract")
     }
-    fn multiply(&self, _lhs: &[f32], _rhs: &[f32]) -> Vec<f32> {
-        unimplemented!("OpenCL multiply not yet implemented");
+
+    fn multiply(&self, lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        self.execute_binary_op(lhs, rhs, "multiply")
     }
-    fn divide(&self, _lhs: &[f32], _rhs: &[f32]) -> Vec<f32> {
-        unimplemented!("OpenCL divide not yet implemented");
+
+    fn divide(&self, lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        self.execute_binary_op(lhs, rhs, "divide")
+    }
+}
+
+impl OpenCLBackend {
+    fn get_or_create_buffer(&self, id: usize, data: &[f32]) -> Buffer<f32> {
+        let mut cache = self.buffer_cache.lock().unwrap();
+        
+        if let Some(buffer) = cache.get(&id) {
+            return buffer.clone();
+        }
+        
+        let buffer = Buffer::builder()
+            .queue(self.queue.clone())
+            .flags(ocl::MemFlags::new().read_write())
+            .len(data.len())
+            .copy_host_slice(data)
+            .build()
+            .expect("Failed to create OpenCL buffer");
+            
+        cache.insert(id, buffer.clone());
+        buffer
+    }
+    
+    fn execute_binary_op(&self, lhs: &[f32], rhs: &[f32], op_name: &str) -> Vec<f32> {
+        assert_eq!(lhs.len(), rhs.len(), "Shape mismatch in OpenCL {}", op_name);
+        
+        let len = lhs.len();
+        let lhs_buffer = self.get_or_create_buffer(0, lhs);
+        let rhs_buffer = self.get_or_create_buffer(1, rhs);
+        
+        let result_buffer = Buffer::builder()
+            .queue(self.queue.clone())
+            .flags(ocl::MemFlags::new().read_write())
+            .len(len)
+            .build()
+            .expect("Failed to create result buffer");
+            
+        let kernel = ocl::Kernel::builder()
+            .program(&self.program)
+            .name(op_name)
+            .arg(&lhs_buffer)
+            .arg(&rhs_buffer)
+            .arg(&result_buffer)
+            .arg(len as u32)
+            .build()
+            .expect("Failed to create kernel");
+            
+        unsafe {
+            kernel.enq().expect("Failed to enqueue kernel");
+        }
+        
+        let mut result = vec![0.0f32; len];
+        result_buffer
+            .read(&mut result)
+            .enq()
+            .expect("Failed to read result buffer");
+            
+        result
     }
 }
 
@@ -216,6 +355,74 @@ impl LazyBuffer {
         if self.data.is_none() {
             let mut cache = HashMap::new();
             let computed_data = self.compute(backend, &mut cache);
+            self.data = Some(computed_data);
+        }
+
+        self.data
+            .as_ref()
+            .expect("Data should be computed and stored by now")
+    }
+
+    pub fn keep_on_gpu(&self, backend: &OpenCLBackend) -> bool {
+        match &self.data {
+            Some(data) => {
+                backend.get_or_create_buffer(self.id, data);
+                true
+            }
+            None => false
+        }
+    }
+    
+    fn compute_with_gpu_awareness(
+        &self,
+        backend: &OpenCLBackend,
+        buffer_cache: &mut HashMap<usize, Vec<f32>>,
+        gpu_buffer_ids: &mut HashSet<usize>,
+    ) -> Vec<f32> {
+        if let Some(data) = buffer_cache.get(&self.id) {
+            return data.clone();
+        }
+
+        if let Some(data) = &self.data {
+            buffer_cache.insert(self.id, data.clone());
+            return data.clone();
+        }
+
+        let result = match &self.operation {
+            TensorOperation::Creation => {
+                panic!("Attempted to compute a 'Creation' buffer with no data");
+            }
+            TensorOperation::Add(left, right) | 
+            TensorOperation::Subtract(left, right) |
+            TensorOperation::Multiply(left, right) |
+            TensorOperation::Divide(left, right) => {
+                let left_data = left.buffer.compute_with_gpu_awareness(
+                    backend, buffer_cache, gpu_buffer_ids);
+                let right_data = right.buffer.compute_with_gpu_awareness(
+                    backend, buffer_cache, gpu_buffer_ids);
+
+                gpu_buffer_ids.insert(left.buffer.id);
+                gpu_buffer_ids.insert(right.buffer.id);
+
+                match self.operation {
+                    TensorOperation::Add(_, _) => backend.add(&left_data, &right_data),
+                    TensorOperation::Subtract(_, _) => backend.subtract(&left_data, &right_data),
+                    TensorOperation::Multiply(_, _) => backend.multiply(&left_data, &right_data),
+                    TensorOperation::Divide(_, _) => backend.divide(&left_data, &right_data),
+                    _ => unreachable!(),
+                }
+            }
+        };
+
+        buffer_cache.insert(self.id, result.clone());
+        result
+    }
+    
+    pub fn realize_gpu(&mut self, backend: &OpenCLBackend) -> &[f32] {
+        if self.data.is_none() {
+            let mut cache = HashMap::new();
+            let mut gpu_buffers = HashSet::new();
+            let computed_data = self.compute_with_gpu_awareness(backend, &mut cache, &mut gpu_buffers);
             self.data = Some(computed_data);
         }
 

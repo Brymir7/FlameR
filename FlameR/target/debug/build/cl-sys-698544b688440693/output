@@ -1,0 +1,1 @@
+cargo:rustc-link-search=native=C:\Program Files (x86)\OCL_SDK_Light\lib\x86_64
