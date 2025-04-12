@@ -1,7 +1,6 @@
-use crate::lazybuffer::{Device, LazyBuffer};
+use crate::lazybuffer::{Backend, LazyBuffer};
 use std::sync::Arc;
 
-struct TensorHandle(usize);
 pub struct Tensor {
     pub buffer: LazyBuffer,
 }
@@ -12,10 +11,11 @@ impl Tensor {
             buffer: LazyBuffer::new(data),
         }
     }
-    pub fn to_device(&mut self, device: Device) {
-        self.buffer.to_device(device);
+    pub fn realize(&mut self, backend: &dyn Backend) {
+        self.buffer.realize(backend);
     }
 }
+
 
 use std::{
     fmt::Debug,
