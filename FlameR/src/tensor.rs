@@ -1,4 +1,4 @@
-use crate::lazybuffer::{Backend, LazyBuffer, OpenCLBackend};
+use crate::lazybuffer::{Backend, LazyBuffer, VulkanBackend};
 use std::sync::Arc;
 
 pub struct Tensor {
@@ -14,11 +14,11 @@ impl Tensor {
     pub fn realize(&mut self, backend: &dyn Backend) {
         self.buffer.realize(backend);
     }
-    pub fn realize_gpu(&mut self, backend: &OpenCLBackend) {
+    pub fn realize_gpu(&mut self, backend: &VulkanBackend) {
         self.buffer.realize_gpu(backend);
     }
     
-    pub fn keep_on_gpu(&self, backend: &OpenCLBackend) -> bool {
+    pub fn keep_on_gpu(&self, backend: &VulkanBackend) -> bool {
         self.buffer.keep_on_gpu(backend)
     }
 }

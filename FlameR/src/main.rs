@@ -1,10 +1,10 @@
-use lazybuffer::OpenCLBackend;
+use lazybuffer::VulkanBackend;
 
 pub mod lazybuffer;
 pub mod tensor;
 
 fn main() {
-    let backend = OpenCLBackend::default();
+    let backend = VulkanBackend::default();
     
     let t = tensor::Tensor::new(vec![1.0, 2.0, 3.0]);
     let t2 = tensor::Tensor::new(vec![4.0, 5.0, 6.0]);
@@ -17,5 +17,4 @@ fn main() {
     
     t3.realize_gpu(&backend);
     println!("After computation: {:?}", t3);
-
 }
