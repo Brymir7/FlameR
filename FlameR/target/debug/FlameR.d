@@ -1,1 +1,0 @@
-C:\Users\imate\Documents\GitHub\FlameR\FlameR\target\debug\FlameR.exe: C:\Users\imate\Documents\GitHub\FlameR\FlameR\src\lazybuffer.rs C:\Users\imate\Documents\GitHub\FlameR\FlameR\src\main.rs C:\Users\imate\Documents\GitHub\FlameR\FlameR\src\tensor.rs
