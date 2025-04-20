@@ -1,0 +1,13 @@
+[package]
+name = "vulkano_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vulkano = "0.35.1"
+vulkano-shaders = "0.35.0"
+ash = "0.37.3"
+shaderc = "0.8.2"
+bytemuck = { version = "1.13.1", features = ["derive"] }
+memoffset = "0.9.0"
+lazy_static = "1.4.0"
