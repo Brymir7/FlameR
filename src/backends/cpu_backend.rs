@@ -1,10 +1,10 @@
-use crate::lazybuffer::{Backend, BufferHandle};
+use crate::lazybuffer::{Backend, BufferHandle, LazyBufferHandle};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub struct CPUBackend {
     name: String,
-    buffers: Mutex<HashMap<usize, Vec<f32>>>,
+    buffers: Mutex<HashMap<LazyBufferHandle, Vec<f32>>>,
 }
 
 impl CPUBackend {
@@ -52,7 +52,7 @@ impl Backend for CPUBackend {
         if let Some(buffer) = buffers.get(&handle.id) {
             buffer.clone()
         } else {
-            panic!("Buffer with ID {} not found", handle.id);
+            panic!("Buffer with ID {:?} not found", handle.id);
         }
     }
 

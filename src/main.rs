@@ -146,28 +146,6 @@ mod tests {
 }
 
 fn main() {
-    // let vulkan_backend = VulkanBackend::new("Vulkano Test");
-    // let cpu_backend = CPUBackend::new();
-    // const TENSOR_SIZE : usize = 1_000_000;
-    // let mut data_a = Vec::with_capacity(TENSOR_SIZE);
-    // let mut data_b = Vec::with_capacity(TENSOR_SIZE);
-    // for i in 0..TENSOR_SIZE {
-    //     data_a.push(i as f32);
-    //     data_b.push((i * 2) as f32 + 1.0);
-    // }
-
-    // let tensor_a = Tensor::new(data_a);
-    // let tensor_b = Tensor::new(data_b);
-
-    // println!("Starting training loop tests...");
-
-    // test_backend_performance("CPU", &cpu_backend, tensor_a.clone(), tensor_b.clone());
-    // test_backend_performance(
-    //     "Vulkan",
-    //     &vulkan_backend,
-    //     tensor_a.clone(),
-    //     tensor_b.clone(),
-    // );
     let vulkan_backend = VulkanBackend::new("Vulkano Test");
     let cpu_backend = CPUBackend::new();
     let mut a = Tensor::new(vec![1.0, 2.0, 3.0]);
@@ -178,48 +156,8 @@ fn main() {
         let mut loss = target - predictions;
         loss.backward(&vulkan_backend);
         println!("a: {:?}", a);
-        break;
-        // a.apply_gradients(&vulkan_backend);
-        // w.apply_gradients(&vulkan_backend);
+        a.apply_gradients(&vulkan_backend);
+        w.apply_gradients(&vulkan_backend);
         // println!("Loss: {:?}", loss);
     }
-}
-
-fn test_backend_performance(name: &str, backend: &dyn Backend, tensor_a: Tensor, tensor_b: Tensor) {
-    println!("\n===== Testing {} backend =====", name);
-
-    let iterations = 1000;
-
-    let start = Instant::now();
-    for _ in 0..iterations {
-        let mut result = tensor_a.clone() + tensor_b.clone();
-        result.realize(backend);
-    }
-
-    let standard_duration = start.elapsed();
-    println!(
-        "{} - Standard execution: {:?} ({:?} per iteration)",
-        name,
-        standard_duration,
-        standard_duration / iterations as u32
-    );
-
-    let start = Instant::now();
-
-    Tensor::run_training_loop(backend, iterations, |_| {
-        let mut result = tensor_a.clone() + tensor_b.clone();
-        result.realize(&*backend);
-        result
-    });
-
-    let cached_duration = start.elapsed();
-    println!(
-        "{} - Cached execution: {:?} ({:?} per iteration)",
-        name,
-        cached_duration,
-        cached_duration / iterations as u32
-    );
-
-    let speedup = standard_duration.as_secs_f64() / cached_duration.as_secs_f64();
-    println!("{} - Speedup with caching: {:.2}x", name, speedup);
 }

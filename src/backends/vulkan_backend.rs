@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Mutex;
 
-use crate::lazybuffer::{Backend, BufferHandle};
+use crate::lazybuffer::{Backend, BufferHandle, LazyBufferHandle};
 use crate::vulkan::{Buffer, VulkanBackend as VulkanCore};
 
 pub struct VulkanBackend {
     name: String,
     vulkan: std::rc::Rc<VulkanCore>,
-    buffers: Mutex<HashMap<usize, Buffer>>,
+    buffers: Mutex<HashMap<LazyBufferHandle, Buffer>>,
     operation_type: Mutex<HashMap<vk::Pipeline, String>>,
     pipelines: Mutex<HashMap<String, vk::Pipeline>>,
 }
@@ -224,7 +224,7 @@ impl Backend for VulkanBackend {
 
             result
         } else {
-            panic!("Buffer with ID {} not found", handle.id);
+            panic!("Buffer with ID {:?} not found", handle.id);
         }
     }
 

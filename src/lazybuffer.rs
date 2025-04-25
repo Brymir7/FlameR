@@ -1,7 +1,8 @@
-use crate::tensor::TensorOperation;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, RwLock};
+
+use crate::tensor::Tensor;
 
 // The Backend trait defines operations that any tensor backend must implement
 pub trait Backend {
@@ -20,7 +21,7 @@ pub trait Backend {
 // Struct to represent a buffer on a particular backend
 #[derive(Debug, Clone)]
 pub struct BufferHandle {
-    pub id: usize,
+    pub id: LazyBufferHandle,
     pub size: usize,
 }
 
@@ -29,24 +30,20 @@ pub struct BufferHandle {
 pub struct LazyBuffer {
     pub data: Option<Vec<f32>>,
     pub size: usize,
-    pub operation: TensorOperation,
+    pub operation: LazyOp,
     pub gpu_buffer: Option<BufferHandle>,
     pub is_dirty: bool,
-    pub id: usize,
+    pub id: LazyBufferHandle,
 }
 
 // The find_tensor_by_id method will use a global hashmap to track tensors for updating their GPU buffers
 lazy_static::lazy_static! {
-    static ref TENSOR_REGISTRY: Mutex<HashMap<usize, Arc<RwLock<LazyBuffer>>>> = Mutex::new(HashMap::new());
+    static ref LAZYBUFFER_REGISTRY: Mutex<HashMap<LazyBufferHandle, Arc<RwLock<LazyBuffer>>>> = Mutex::new(HashMap::new());
 }
 
 impl fmt::Debug for LazyBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "LazyBuffer[{}] data {:?}",
-            self.id, self.data
-        )
+        write!(f, "LazyBuffer[{:?}] data {:?}", self.id, self.data)
     }
 }
 
@@ -55,44 +52,61 @@ lazy_static::lazy_static! {
     static ref NEXT_BUFFER_ID: Mutex<usize> = Mutex::new(0);
 }
 
-pub fn get_next_buffer_id() -> usize {
+pub fn get_next_buffer_id() -> LazyBufferHandle {
     let mut id = NEXT_BUFFER_ID.lock().unwrap();
     let current = *id;
     *id += 1;
-    current
+    LazyBufferHandle(current)
 }
 
 impl LazyBuffer {
-    pub fn new(data: Vec<f32>) -> Self {
+    pub fn new(data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
         let id = get_next_buffer_id();
 
         let buffer = LazyBuffer {
             data: Some(data),
             size,
-            operation: TensorOperation::Creation,
+            operation: LazyOp::Creation,
             gpu_buffer: None,
             is_dirty: true,
             id,
         };
 
-        // Register this buffer for future updates
         let buffer_arc = Arc::new(RwLock::new(buffer.clone()));
-        TENSOR_REGISTRY.lock().unwrap().insert(id, buffer_arc);
+        LAZYBUFFER_REGISTRY.lock().unwrap().insert(id, buffer_arc);
 
-        buffer
+        buffer.id
     }
 
-    pub fn from_operation(op: TensorOperation) -> Self {
+    pub fn from_operation(op: LazyOp) -> LazyBufferHandle {
         // Determine size based on the operation
         let size = match &op {
-            TensorOperation::Creation => 0, // This shouldn't happen but is here for completeness
-            TensorOperation::Add(a, b)
-            | TensorOperation::Subtract(a, b)
-            | TensorOperation::Multiply(a, b)
-            | TensorOperation::Divide(a, b) => {
-                assert_eq!(a.buffer.size, b.buffer.size, "Tensor sizes must match");
-                a.buffer.size
+            LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
+            LazyOp::Add(a, b)
+            | LazyOp::Subtract(a, b)
+            | LazyOp::Multiply(a, b)
+            | LazyOp::Divide(a, b) => {
+                let a_size = LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .size;
+                let b_size = LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&b)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .size;
+                if a_size != b_size {
+                    panic!("Size mismatch in operation: {} vs {}", a_size, b_size);
+                }
+                a_size
             }
         };
 
@@ -109,34 +123,90 @@ impl LazyBuffer {
 
         // Register this buffer for future updates
         let buffer_arc = Arc::new(RwLock::new(buffer.clone()));
-        TENSOR_REGISTRY.lock().unwrap().insert(id, buffer_arc);
+        LAZYBUFFER_REGISTRY.lock().unwrap().insert(id, buffer_arc);
 
-        buffer
+        buffer.id
     }
 
     // Get visualization of the computation graph for debugging
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
-            TensorOperation::Creation => format!("Data[{}]", self.id),
-            TensorOperation::Add(a, b) => format!(
+            LazyOp::Creation => format!("Data[{:?}]", self.id),
+            LazyOp::Add(a, b) => format!(
                 "({}+{})",
-                a.buffer.get_comp_graph_viz(),
-                b.buffer.get_comp_graph_viz()
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz(),
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&b)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz()
             ),
-            TensorOperation::Subtract(a, b) => format!(
+            LazyOp::Subtract(a, b) => format!(
                 "({}-{})",
-                a.buffer.get_comp_graph_viz(),
-                b.buffer.get_comp_graph_viz()
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz(),
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&b)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz()
             ),
-            TensorOperation::Multiply(a, b) => format!(
+            LazyOp::Multiply(a, b) => format!(
                 "({}*{})",
-                a.buffer.get_comp_graph_viz(),
-                b.buffer.get_comp_graph_viz()
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz(),
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&b)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz()
             ),
-            TensorOperation::Divide(a, b) => format!(
+            LazyOp::Divide(a, b) => format!(
                 "({}/{})",
-                a.buffer.get_comp_graph_viz(),
-                b.buffer.get_comp_graph_viz()
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz(),
+                LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&b)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .get_comp_graph_viz()
             ),
         }
     }
@@ -144,8 +214,8 @@ impl LazyBuffer {
     // Find all dependencies in the computation graph
     fn collect_dependencies<'a>(
         &'a self,
-        deps: &mut HashMap<usize, &'a LazyBuffer>,
-        visited: &mut HashSet<usize>,
+        deps: &mut HashMap<LazyBufferHandle, &'a LazyBuffer>,
+        visited: &mut HashSet<LazyBufferHandle>,
     ) {
         if visited.contains(&self.id) {
             return;
@@ -154,22 +224,20 @@ impl LazyBuffer {
         visited.insert(self.id);
 
         match &self.operation {
-            TensorOperation::Creation => {
+            LazyOp::Creation => {
                 deps.insert(self.id, self);
             }
-            TensorOperation::Add(a, b)
-            | TensorOperation::Subtract(a, b)
-            | TensorOperation::Multiply(a, b)
-            | TensorOperation::Divide(a, b) => {
-                a.buffer.collect_dependencies(deps, visited);
-                b.buffer.collect_dependencies(deps, visited);
+            LazyOp::Add(a, b)
+            | LazyOp::Subtract(a, b)
+            | LazyOp::Multiply(a, b)
+            | LazyOp::Divide(a, b) => {
                 deps.insert(self.id, self);
             }
         }
     }
 
     // Topologically sort buffer operations
-    fn topological_sort(&self) -> Vec<usize> {
+    fn topological_sort(&self) -> Vec<LazyBufferHandle> {
         let mut deps = HashMap::new();
         let mut visited = HashSet::new();
         self.collect_dependencies(&mut deps, &mut visited);
@@ -179,11 +247,11 @@ impl LazyBuffer {
         let mut perm_mark = HashSet::new();
 
         fn visit(
-            node_id: usize,
-            deps: &HashMap<usize, &LazyBuffer>,
-            temp_mark: &mut HashSet<usize>,
-            perm_mark: &mut HashSet<usize>,
-            result: &mut Vec<usize>,
+            node_id: LazyBufferHandle,
+            deps: &HashMap<LazyBufferHandle, &LazyBuffer>,
+            temp_mark: &mut HashSet<LazyBufferHandle>,
+            perm_mark: &mut HashSet<LazyBufferHandle>,
+            result: &mut Vec<LazyBufferHandle>,
         ) {
             if temp_mark.contains(&node_id) {
                 panic!("Cycle detected in computation graph");
@@ -194,13 +262,13 @@ impl LazyBuffer {
 
                 let node = deps.get(&node_id).unwrap();
                 match &node.operation {
-                    TensorOperation::Creation => {}
-                    TensorOperation::Add(a, b)
-                    | TensorOperation::Subtract(a, b)
-                    | TensorOperation::Multiply(a, b)
-                    | TensorOperation::Divide(a, b) => {
-                        visit(a.buffer.id, deps, temp_mark, perm_mark, result);
-                        visit(b.buffer.id, deps, temp_mark, perm_mark, result);
+                    LazyOp::Creation => {}
+                    LazyOp::Add(a, b)
+                    | LazyOp::Subtract(a, b)
+                    | LazyOp::Multiply(a, b)
+                    | LazyOp::Divide(a, b) => {
+                        visit(*a, deps, temp_mark, perm_mark, result);
+                        visit(*b, deps, temp_mark, perm_mark, result);
                     }
                 }
 
@@ -242,29 +310,29 @@ impl LazyBuffer {
             let result_handle = buffer_handles.get(&id).unwrap();
 
             match &node.operation {
-                TensorOperation::Creation => {
+                LazyOp::Creation => {
                     if let Some(data) = &node.data {
                         backend.to_device(data, result_handle);
                     }
                 }
-                TensorOperation::Add(a, b) => {
-                    let a_handle = buffer_handles.get(&a.buffer.id).unwrap();
-                    let b_handle = buffer_handles.get(&b.buffer.id).unwrap();
+                LazyOp::Add(a, b) => {
+                    let a_handle = buffer_handles.get(&a).unwrap();
+                    let b_handle = buffer_handles.get(&b).unwrap();
                     backend.add(a_handle, b_handle, result_handle, node.size);
                 }
-                TensorOperation::Subtract(a, b) => {
-                    let a_handle = buffer_handles.get(&a.buffer.id).unwrap();
-                    let b_handle = buffer_handles.get(&b.buffer.id).unwrap();
+                LazyOp::Subtract(a, b) => {
+                    let a_handle = buffer_handles.get(&a).unwrap();
+                    let b_handle = buffer_handles.get(&b).unwrap();
                     backend.subtract(a_handle, b_handle, result_handle, node.size);
                 }
-                TensorOperation::Multiply(a, b) => {
-                    let a_handle = buffer_handles.get(&a.buffer.id).unwrap();
-                    let b_handle = buffer_handles.get(&b.buffer.id).unwrap();
+                LazyOp::Multiply(a, b) => {
+                    let a_handle = buffer_handles.get(&a).unwrap();
+                    let b_handle = buffer_handles.get(&b).unwrap();
                     backend.multiply(a_handle, b_handle, result_handle, node.size);
                 }
-                TensorOperation::Divide(a, b) => {
-                    let a_handle = buffer_handles.get(&a.buffer.id).unwrap();
-                    let b_handle = buffer_handles.get(&b.buffer.id).unwrap();
+                LazyOp::Divide(a, b) => {
+                    let a_handle = buffer_handles.get(&a).unwrap();
+                    let b_handle = buffer_handles.get(&b).unwrap();
                     backend.divide(a_handle, b_handle, result_handle, node.size);
                 }
             }
@@ -273,15 +341,57 @@ impl LazyBuffer {
             // if cpu its not expensive
             let result_handle = buffer_handles.get(&self.id).unwrap();
             let result_data = backend.to_host(result_handle, self.size);
-            println!(
-                "LazyBuffer[{}] realized to host with size {}",
-                self.id, self.size
-            );
+
             self.data = Some(result_data);
         }
-        // Return used buffers to cache when done
         for (_, handle) in buffer_handles {
             crate::training::return_buffer_to_cache(backend.name(), handle);
         }
+    }
+}
+
+// need lazy buffer ops instead
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
+pub struct LazyBufferHandle(usize);
+#[derive(Clone)]
+pub enum LazyOp {
+    Creation,
+    Add(LazyBufferHandle, LazyBufferHandle),
+    Subtract(LazyBufferHandle, LazyBufferHandle),
+    Multiply(LazyBufferHandle, LazyBufferHandle),
+    Divide(LazyBufferHandle, LazyBufferHandle),
+    Clear(LazyBufferHandle),
+}
+
+impl LazyBufferHandle {
+    pub fn realize(&self, backend: &dyn Backend, to_host: bool) {
+        let mut buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let mut buffer = buffer.get_mut(self).unwrap().write().unwrap();
+        buffer.realize(backend, to_host);
+    }
+    pub fn get_comp_graph_viz(&self) -> String {
+        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let buffer = buffer.get(self).unwrap().read().unwrap();
+        buffer.get_comp_graph_viz()
+    }
+    pub fn get_data(&self) -> Option<Vec<f32>> {
+        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let buffer = buffer.get(self).unwrap().read().unwrap();
+        buffer.data.clone()
+    }
+    pub fn get_size(&self) -> usize {
+        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let buffer = buffer.get(self).unwrap().read().unwrap();
+        buffer.size
+    }
+    pub fn get_op(&self) -> LazyOp {
+        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let buffer = buffer.get(self).unwrap().read().unwrap();
+        buffer.operation.clone()
+    }
+    pub fn clear(&self) {
+        let mut buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let mut buffer = buffer.get_mut(self).unwrap().write().unwrap();
+        buffer.operation = LazyOp::Clear(*self);
     }
 }
