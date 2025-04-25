@@ -109,14 +109,16 @@ impl LazyBuffer {
         id
     }
     pub fn from_operation(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
-        // Determine size based on the operation
         let size = match &op {
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
             | LazyOp::Divide(a, b) => {
                 println!("Operation: {:?}", op);
-                println!("curr reg: {:?}", LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.len()));
+                println!(
+                    "curr reg: {:?}",
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.len())
+                );
                 let a_size =
                     LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
                 let b_size =
@@ -148,7 +150,6 @@ impl LazyBuffer {
         id
     }
     pub fn from_operation_no_parent(op: LazyOp) -> LazyBufferHandle {
-        // Determine size based on the operation
         let size = match &op {
             LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
             LazyOp::Clear(a) => {
@@ -187,7 +188,6 @@ impl LazyBuffer {
 
         id
     }
-    // Get visualization of the computation graph for debugging
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
             LazyOp::Creation => format!("Data[{:?}]", self.id),
@@ -205,7 +205,6 @@ impl LazyBuffer {
         }
     }
 
-    // Private method to collect dependencies
     fn collect_dependencies(&self) -> HashMap<LazyBufferHandle, LazyBuffer> {
         let mut deps = HashMap::new();
         let mut visited = HashSet::new();
@@ -243,7 +242,6 @@ impl LazyBuffer {
         deps
     }
 
-    // Private method to topologically sort operations
     fn topological_sort(deps: &HashMap<LazyBufferHandle, LazyBuffer>) -> Vec<LazyBufferHandle> {
         let mut result = Vec::new();
         let mut temp_mark = HashSet::new();
@@ -290,7 +288,6 @@ impl LazyBuffer {
         result
     }
 
-    // Private implementation of realize that takes pre-collected dependencies
     fn realize_impl(
         &mut self,
         backend: &dyn Backend,
@@ -307,7 +304,7 @@ impl LazyBuffer {
         // Allocate buffers
         for &id in &order {
             let node = deps.get(&id).unwrap();
-            let handle = crate::training::get_cached_buffer(backend, node.size);
+            let handle = backend.allocate_buffer(node.size);
             buffer_handles.insert(id, handle);
         }
 
@@ -352,10 +349,6 @@ impl LazyBuffer {
             let result_handle = buffer_handles.get(&self.id).unwrap();
             let result_data = backend.to_host(result_handle, self.size);
             self.data = Some(result_data);
-        }
-
-        for (_, handle) in buffer_handles {
-            crate::training::return_buffer_to_cache(backend.name(), handle);
         }
     }
 }

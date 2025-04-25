@@ -4,8 +4,6 @@ pub mod tensor;
 pub mod vulkan;
 use crate::backends::{CPUBackend, VulkanBackend};
 use crate::tensor::Tensor;
-
-pub mod training;
 fn main() {
     let vulkan_backend = VulkanBackend::new("Vulkano Test");
     let cpu_backend = CPUBackend::new();
@@ -15,7 +13,7 @@ fn main() {
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
     let predictions = a * w;
     let mut loss = target - predictions;
-    loss.backward(&cpu_backend);
+    loss.backward(&vulkan_backend);
     println!("a: {:?}", a);
     println!("w: {:?}", w);
     // println!("Loss: {:?}", loss);

@@ -68,13 +68,9 @@ impl Tensor {
     pub fn realize_to_host(&mut self, backend: &dyn Backend) {
         self.buffer.realize(backend, true);
     }
-    pub fn begin_training_loop(backend: &dyn Backend) {
-        crate::training::begin_training_loop(backend);
-    }
+    pub fn begin_training_loop(backend: &dyn Backend) {}
 
-    pub fn end_training_loop(backend_name: &str) {
-        crate::training::end_training_loop(backend_name);
-    }
+    pub fn end_training_loop(backend_name: &str) {}
 
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
@@ -145,7 +141,7 @@ impl Tensor {
         }
         for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
             if tensor.gradient.is_some() {
-                tensor.gradient.as_mut().unwrap().realize(backend, false);
+                tensor.gradient.as_mut().unwrap().realize(backend, true);
                 println!(
                     "Tensor ID: {:?}, Gradient: {:?}",
                     tensor.id,
@@ -169,10 +165,6 @@ impl Tensor {
         }
 
         Tensor::end_training_loop(backend.name());
-    }
-
-    pub fn free_buffer_cache(backend: &dyn Backend) {
-        crate::training::free_all_cached_buffers(backend);
     }
 }
 impl Debug for Tensor {
