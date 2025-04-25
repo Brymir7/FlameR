@@ -5,6 +5,20 @@ use std::hash::Hash;
 use std::sync::Mutex;
 
 use crate::tensor::TensorId;
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub struct LazyBufferHandle(pub usize);
+
+#[derive(Debug, Clone)]
+pub enum LazyOp {
+    Creation,
+    Clear(LazyBufferHandle),
+    Add(LazyBufferHandle, LazyBufferHandle),
+    Subtract(LazyBufferHandle, LazyBufferHandle),
+    Multiply(LazyBufferHandle, LazyBufferHandle),
+    Divide(LazyBufferHandle, LazyBufferHandle),
+}
+
 pub trait Backend {
     fn allocate_buffer(&self, size: usize) -> BufferHandle;
     fn free_buffer(&self, handle: &BufferHandle);
@@ -128,8 +142,6 @@ impl LazyBuffer {
             id,
             parent: Some(tensor_id),
         };
-
-        // Register this buffer for future updates
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
             registry.push(buffer);
         });
@@ -193,46 +205,46 @@ impl LazyBuffer {
         }
     }
 
-    // Find all dependencies in the computation graph
-    fn collect_dependencies(
-        buffer: LazyBuffer,
-        deps: &mut HashMap<LazyBufferHandle, LazyBuffer>,
-        visited: &mut HashSet<LazyBufferHandle>,
-    ) {
-        if visited.contains(&buffer.id) {
-            return;
-        }
-
-        visited.insert(buffer.id);
-
-        match &buffer.operation {
-            LazyOp::Creation => {
-                deps.insert(buffer.id, buffer);
-            }
-            LazyOp::Clear(_) => {
-                deps.insert(buffer.id, buffer);
-            }
-            LazyOp::Add(a, b)
-            | LazyOp::Subtract(a, b)
-            | LazyOp::Multiply(a, b)
-            | LazyOp::Divide(a, b) => {
-                 LAZYBUFFER_REGISTRY.with_borrow(|registry| {
-                    let a_buffer = registry.get(a.0).unwrap();
-                    let b_buffer = registry.get(b.0).unwrap();
-                    Self::collect_dependencies(a_buffer.clone(), deps, visited);
-                    Self::collect_dependencies(b_buffer.clone(), deps, visited);
-                });
-                deps.insert(buffer.id, buffer);
-            }
-        }
-    }
-
-    // Topologically sort buffer operations
-    fn topological_sort(&self) -> Vec<LazyBufferHandle> {
+    // Private method to collect dependencies
+    fn collect_dependencies(&self) -> HashMap<LazyBufferHandle, LazyBuffer> {
         let mut deps = HashMap::new();
         let mut visited = HashSet::new();
-        Self::collect_dependencies(self.clone(), &mut deps, &mut visited);
 
+        fn collect_recursive(
+            current_id: LazyBufferHandle,
+            deps: &mut HashMap<LazyBufferHandle, LazyBuffer>,
+            visited: &mut HashSet<LazyBufferHandle>,
+        ) {
+            if visited.contains(&current_id) {
+                return;
+            }
+
+            visited.insert(current_id);
+
+            let current = LAZYBUFFER_REGISTRY
+                .with_borrow(|registry| registry.get(current_id.0).unwrap().clone());
+
+            match &current.operation {
+                LazyOp::Creation | LazyOp::Clear(_) => {
+                    deps.insert(current_id, current);
+                }
+                LazyOp::Add(a, b)
+                | LazyOp::Subtract(a, b)
+                | LazyOp::Multiply(a, b)
+                | LazyOp::Divide(a, b) => {
+                    collect_recursive(*a, deps, visited);
+                    collect_recursive(*b, deps, visited);
+                    deps.insert(current_id, current);
+                }
+            }
+        }
+
+        collect_recursive(self.id, &mut deps, &mut visited);
+        deps
+    }
+
+    // Private method to topologically sort operations
+    fn topological_sort(deps: &HashMap<LazyBufferHandle, LazyBuffer>) -> Vec<LazyBufferHandle> {
         let mut result = Vec::new();
         let mut temp_mark = HashSet::new();
         let mut perm_mark = HashSet::new();
@@ -253,8 +265,7 @@ impl LazyBuffer {
 
                 let node = deps.get(&node_id).unwrap();
                 match &node.operation {
-                    LazyOp::Creation => {}
-                    LazyOp::Clear(_) => {}
+                    LazyOp::Creation | LazyOp::Clear(_) => {}
                     LazyOp::Add(a, b)
                     | LazyOp::Subtract(a, b)
                     | LazyOp::Multiply(a, b)
@@ -272,31 +283,35 @@ impl LazyBuffer {
 
         for &id in deps.keys() {
             if !perm_mark.contains(&id) {
-                visit(id, &deps, &mut temp_mark, &mut perm_mark, &mut result);
+                visit(id, deps, &mut temp_mark, &mut perm_mark, &mut result);
             }
         }
 
         result
     }
 
-    pub fn realize(&mut self, backend: &dyn Backend, to_host: bool) {
+    // Private implementation of realize that takes pre-collected dependencies
+    fn realize_impl(
+        &mut self,
+        backend: &dyn Backend,
+        to_host: bool,
+        deps: HashMap<LazyBufferHandle, LazyBuffer>,
+    ) {
         if let Some(_) = &self.data {
             return;
         }
-        let order = self.topological_sort();
 
+        let order = Self::topological_sort(&deps);
         let mut buffer_handles = HashMap::new();
-        let mut deps = HashMap::new();
-        let mut visited = HashSet::new();
-        Self::collect_dependencies(self.clone(), &mut deps, &mut visited);
 
+        // Allocate buffers
         for &id in &order {
             let node = deps.get(&id).unwrap();
-            // Use the buffer cache for allocations during training
             let handle = crate::training::get_cached_buffer(backend, node.size);
             buffer_handles.insert(id, handle);
         }
 
+        // Process operations
         for &id in &order {
             let node = deps.get(&id).unwrap();
             let result_handle = buffer_handles.get(&id).unwrap();
@@ -332,38 +347,30 @@ impl LazyBuffer {
                 }
             }
         }
+
         if (to_host || matches!(backend.name(), "CPU")) && self.is_dirty {
-            // if cpu its not expensive
             let result_handle = buffer_handles.get(&self.id).unwrap();
             let result_data = backend.to_host(result_handle, self.size);
-
             self.data = Some(result_data);
         }
+
         for (_, handle) in buffer_handles {
             crate::training::return_buffer_to_cache(backend.name(), handle);
         }
     }
 }
 
-// need lazy buffer ops instead
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-pub struct LazyBufferHandle(usize);
-#[derive(Clone, Debug)]
-pub enum LazyOp {
-    Creation,
-    Add(LazyBufferHandle, LazyBufferHandle),
-    Subtract(LazyBufferHandle, LazyBufferHandle),
-    Multiply(LazyBufferHandle, LazyBufferHandle),
-    Divide(LazyBufferHandle, LazyBufferHandle),
-    Clear(LazyBufferHandle),
-}
-
 impl LazyBufferHandle {
     pub fn realize(&self, backend: &dyn Backend, to_host: bool) {
+        let deps = LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.collect_dependencies()
+        });
+
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
-            registry.get_mut(self.0).unwrap();
+            // Then realize with the collected dependencies
             let buffer = registry.get_mut(self.0).unwrap();
-            buffer.realize(backend, to_host);
+            buffer.realize_impl(backend, to_host, deps);
         });
     }
     pub fn get_comp_graph_viz(&self) -> String {
@@ -372,12 +379,7 @@ impl LazyBufferHandle {
             buffer.get_comp_graph_viz()
         })
     }
-    pub fn get_compute_graph(&self) -> Vec<LazyBufferHandle> {
-        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
-            let buffer = registry.get(self.0).unwrap();
-            buffer.topological_sort()
-        })
-    }
+
     pub fn get_data(&self) -> Option<Vec<f32>> {
         LAZYBUFFER_REGISTRY.with_borrow(|registry| {
             let buffer = registry.get(self.0).unwrap();
