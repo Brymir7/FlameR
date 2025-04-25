@@ -52,12 +52,7 @@ impl Tensor {
             self.clone(),
             LazyBuffer::new(vec![1.0; self.buffer.get_size()]),
         ));
-        while let Some((curr_tensor, curr_gradient)) = queue.pop_front() {
-            if !curr_tensor.requires_grad {
-                continue;
-            }
-            match curr_tensor.buffer.
-        }
+        let all_tensors = self.buffer.get_compute_graph();
     }
     pub fn run_training_loop<F>(backend: &dyn Backend, iterations: usize, mut step_fn: F)
     where
@@ -82,9 +77,10 @@ impl Tensor {
 }
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
+    sync::{Arc, Mutex, RwLock},
 };
 impl Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

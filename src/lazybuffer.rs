@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, RwLock};
-
-use crate::tensor::Tensor;
-
-// The Backend trait defines operations that any tensor backend must implement
 pub trait Backend {
     fn allocate_buffer(&self, size: usize) -> BufferHandle;
     fn free_buffer(&self, handle: &BufferHandle);
@@ -18,14 +15,12 @@ pub trait Backend {
     fn name(&self) -> &str;
 }
 
-// Struct to represent a buffer on a particular backend
 #[derive(Debug, Clone)]
 pub struct BufferHandle {
     pub id: LazyBufferHandle,
     pub size: usize,
 }
 
-// Buffer data and its computation graph
 #[derive(Clone)]
 pub struct LazyBuffer {
     pub data: Option<Vec<f32>>,
@@ -36,7 +31,6 @@ pub struct LazyBuffer {
     pub id: LazyBufferHandle,
 }
 
-// The find_tensor_by_id method will use a global hashmap to track tensors for updating their GPU buffers
 lazy_static::lazy_static! {
     static ref LAZYBUFFER_REGISTRY: Mutex<HashMap<LazyBufferHandle, Arc<RwLock<LazyBuffer>>>> = Mutex::new(HashMap::new());
 }
@@ -47,7 +41,6 @@ impl fmt::Debug for LazyBuffer {
     }
 }
 
-// Global buffer ID counter
 lazy_static::lazy_static! {
     static ref NEXT_BUFFER_ID: Mutex<usize> = Mutex::new(0);
 }
@@ -83,6 +76,17 @@ impl LazyBuffer {
         // Determine size based on the operation
         let size = match &op {
             LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
+            LazyOp::Clear(a) => {
+                let a_size = LAZYBUFFER_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .get(&a)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .size;
+                a_size
+            }
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
@@ -132,82 +136,17 @@ impl LazyBuffer {
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
             LazyOp::Creation => format!("Data[{:?}]", self.id),
-            LazyOp::Add(a, b) => format!(
-                "({}+{})",
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz(),
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&b)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz()
-            ),
-            LazyOp::Subtract(a, b) => format!(
-                "({}-{})",
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz(),
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&b)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz()
-            ),
-            LazyOp::Multiply(a, b) => format!(
-                "({}*{})",
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz(),
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&b)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz()
-            ),
-            LazyOp::Divide(a, b) => format!(
-                "({}/{})",
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz(),
-                LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&b)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .get_comp_graph_viz()
-            ),
+            LazyOp::Clear(_) => format!("Clear[{:?}]", self.id),
+            LazyOp::Add(a, b) => format!("({}+{})", a.get_comp_graph_viz(), b.get_comp_graph_viz()),
+            LazyOp::Subtract(a, b) => {
+                format!("({}-{})", a.get_comp_graph_viz(), b.get_comp_graph_viz())
+            }
+            LazyOp::Multiply(a, b) => {
+                format!("({}*{})", a.get_comp_graph_viz(), b.get_comp_graph_viz())
+            }
+            LazyOp::Divide(a, b) => {
+                format!("({}/{})", a.get_comp_graph_viz(), b.get_comp_graph_viz())
+            }
         }
     }
 
@@ -225,6 +164,9 @@ impl LazyBuffer {
 
         match &self.operation {
             LazyOp::Creation => {
+                deps.insert(self.id, self);
+            }
+            LazyOp::Clear(_) => {
                 deps.insert(self.id, self);
             }
             LazyOp::Add(a, b)
@@ -263,6 +205,7 @@ impl LazyBuffer {
                 let node = deps.get(&node_id).unwrap();
                 match &node.operation {
                     LazyOp::Creation => {}
+                    LazyOp::Clear(_) => {}
                     LazyOp::Add(a, b)
                     | LazyOp::Subtract(a, b)
                     | LazyOp::Multiply(a, b)
@@ -335,6 +278,9 @@ impl LazyBuffer {
                     let b_handle = buffer_handles.get(&b).unwrap();
                     backend.divide(a_handle, b_handle, result_handle, node.size);
                 }
+                _ => {
+                    panic!("Unsupported operation: {:?}", node.operation);
+                }
             }
         }
         if (to_host || matches!(backend.name(), "CPU")) && self.is_dirty {
@@ -353,7 +299,7 @@ impl LazyBuffer {
 // need lazy buffer ops instead
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct LazyBufferHandle(usize);
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LazyOp {
     Creation,
     Add(LazyBufferHandle, LazyBufferHandle),
@@ -373,6 +319,11 @@ impl LazyBufferHandle {
         let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
         let buffer = buffer.get(self).unwrap().read().unwrap();
         buffer.get_comp_graph_viz()
+    }
+    pub fn get_compute_graph(&self) -> Vec<LazyBufferHandle> {
+        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
+        let buffer = buffer.get(self).unwrap().read().unwrap();
+        buffer.topological_sort()
     }
     pub fn get_data(&self) -> Option<Vec<f32>> {
         let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
