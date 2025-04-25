@@ -1,7 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
+
+use crate::tensor::TensorId;
 pub trait Backend {
     fn allocate_buffer(&self, size: usize) -> BufferHandle;
     fn free_buffer(&self, handle: &BufferHandle);
@@ -23,16 +26,17 @@ pub struct BufferHandle {
 
 #[derive(Clone)]
 pub struct LazyBuffer {
+    pub id: LazyBufferHandle,
+    pub parent: Option<TensorId>,
     pub data: Option<Vec<f32>>,
     pub size: usize,
     pub operation: LazyOp,
     pub gpu_buffer: Option<BufferHandle>,
     pub is_dirty: bool,
-    pub id: LazyBufferHandle,
 }
 
-lazy_static::lazy_static! {
-    static ref LAZYBUFFER_REGISTRY: Mutex<HashMap<LazyBufferHandle, Arc<RwLock<LazyBuffer>>>> = Mutex::new(HashMap::new());
+thread_local! {
+    pub static LAZYBUFFER_REGISTRY: RefCell<Vec<LazyBuffer>> = RefCell::new(Vec::new());
 }
 
 impl fmt::Debug for LazyBuffer {
@@ -53,7 +57,7 @@ pub fn get_next_buffer_id() -> LazyBufferHandle {
 }
 
 impl LazyBuffer {
-    pub fn new(data: Vec<f32>) -> LazyBufferHandle {
+    pub fn new(tensor_id: TensorId, data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
         let id = get_next_buffer_id();
 
@@ -64,49 +68,48 @@ impl LazyBuffer {
             gpu_buffer: None,
             is_dirty: true,
             id,
+            parent: Some(tensor_id),
         };
-
-        let buffer_arc = Arc::new(RwLock::new(buffer.clone()));
-        LAZYBUFFER_REGISTRY.lock().unwrap().insert(id, buffer_arc);
-
-        buffer.id
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+            registry.push(buffer);
+        });
+        id
     }
+    pub fn without_parent(data: Vec<f32>) -> LazyBufferHandle {
+        let size = data.len();
+        let id = get_next_buffer_id();
 
-    pub fn from_operation(op: LazyOp) -> LazyBufferHandle {
+        let buffer = LazyBuffer {
+            data: Some(data),
+            size,
+            operation: LazyOp::Creation,
+            gpu_buffer: None,
+            is_dirty: true,
+            id,
+            parent: None,
+        };
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+            registry.push(buffer);
+        });
+        id
+    }
+    pub fn from_operation(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
         // Determine size based on the operation
         let size = match &op {
             LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
             LazyOp::Clear(a) => {
-                let a_size = LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .size;
+                let a_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
                 a_size
             }
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
             | LazyOp::Divide(a, b) => {
-                let a_size = LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&a)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .size;
-                let b_size = LAZYBUFFER_REGISTRY
-                    .lock()
-                    .unwrap()
-                    .get(&b)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .size;
+                let a_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
+                let b_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(b.0).unwrap().size);
                 if a_size != b_size {
                     panic!("Size mismatch in operation: {} vs {}", a_size, b_size);
                 }
@@ -123,15 +126,55 @@ impl LazyBuffer {
             gpu_buffer: None,
             is_dirty: true,
             id,
+            parent: Some(tensor_id),
         };
 
         // Register this buffer for future updates
-        let buffer_arc = Arc::new(RwLock::new(buffer.clone()));
-        LAZYBUFFER_REGISTRY.lock().unwrap().insert(id, buffer_arc);
-
-        buffer.id
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+            registry.push(buffer);
+        });
+        id
     }
+    pub fn from_operation_no_parent(op: LazyOp) -> LazyBufferHandle {
+        // Determine size based on the operation
+        let size = match &op {
+            LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
+            LazyOp::Clear(a) => {
+                let a_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
+                a_size
+            }
+            LazyOp::Add(a, b)
+            | LazyOp::Subtract(a, b)
+            | LazyOp::Multiply(a, b)
+            | LazyOp::Divide(a, b) => {
+                let a_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
+                let b_size =
+                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(b.0).unwrap().size);
+                if a_size != b_size {
+                    panic!("Size mismatch in operation: {} vs {}", a_size, b_size);
+                }
+                a_size
+            }
+        };
 
+        let id = get_next_buffer_id();
+
+        let buffer = LazyBuffer {
+            data: None,
+            size,
+            operation: op,
+            gpu_buffer: None,
+            is_dirty: true,
+            id,
+            parent: None,
+        };
+
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| registry.push(buffer));
+
+        id
+    }
     // Get visualization of the computation graph for debugging
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
@@ -151,29 +194,35 @@ impl LazyBuffer {
     }
 
     // Find all dependencies in the computation graph
-    fn collect_dependencies<'a>(
-        &'a self,
-        deps: &mut HashMap<LazyBufferHandle, &'a LazyBuffer>,
+    fn collect_dependencies(
+        buffer: LazyBuffer,
+        deps: &mut HashMap<LazyBufferHandle, LazyBuffer>,
         visited: &mut HashSet<LazyBufferHandle>,
     ) {
-        if visited.contains(&self.id) {
+        if visited.contains(&buffer.id) {
             return;
         }
 
-        visited.insert(self.id);
+        visited.insert(buffer.id);
 
-        match &self.operation {
+        match &buffer.operation {
             LazyOp::Creation => {
-                deps.insert(self.id, self);
+                deps.insert(buffer.id, buffer);
             }
             LazyOp::Clear(_) => {
-                deps.insert(self.id, self);
+                deps.insert(buffer.id, buffer);
             }
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
             | LazyOp::Divide(a, b) => {
-                deps.insert(self.id, self);
+                 LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+                    let a_buffer = registry.get(a.0).unwrap();
+                    let b_buffer = registry.get(b.0).unwrap();
+                    Self::collect_dependencies(a_buffer.clone(), deps, visited);
+                    Self::collect_dependencies(b_buffer.clone(), deps, visited);
+                });
+                deps.insert(buffer.id, buffer);
             }
         }
     }
@@ -182,7 +231,7 @@ impl LazyBuffer {
     fn topological_sort(&self) -> Vec<LazyBufferHandle> {
         let mut deps = HashMap::new();
         let mut visited = HashSet::new();
-        self.collect_dependencies(&mut deps, &mut visited);
+        Self::collect_dependencies(self.clone(), &mut deps, &mut visited);
 
         let mut result = Vec::new();
         let mut temp_mark = HashSet::new();
@@ -190,7 +239,7 @@ impl LazyBuffer {
 
         fn visit(
             node_id: LazyBufferHandle,
-            deps: &HashMap<LazyBufferHandle, &LazyBuffer>,
+            deps: &HashMap<LazyBufferHandle, LazyBuffer>,
             temp_mark: &mut HashSet<LazyBufferHandle>,
             perm_mark: &mut HashSet<LazyBufferHandle>,
             result: &mut Vec<LazyBufferHandle>,
@@ -239,7 +288,7 @@ impl LazyBuffer {
         let mut buffer_handles = HashMap::new();
         let mut deps = HashMap::new();
         let mut visited = HashSet::new();
-        self.collect_dependencies(&mut deps, &mut visited);
+        Self::collect_dependencies(self.clone(), &mut deps, &mut visited);
 
         for &id in &order {
             let node = deps.get(&id).unwrap();
@@ -311,38 +360,49 @@ pub enum LazyOp {
 
 impl LazyBufferHandle {
     pub fn realize(&self, backend: &dyn Backend, to_host: bool) {
-        let mut buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let mut buffer = buffer.get_mut(self).unwrap().write().unwrap();
-        buffer.realize(backend, to_host);
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+            registry.get_mut(self.0).unwrap();
+            let buffer = registry.get_mut(self.0).unwrap();
+            buffer.realize(backend, to_host);
+        });
     }
     pub fn get_comp_graph_viz(&self) -> String {
-        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let buffer = buffer.get(self).unwrap().read().unwrap();
-        buffer.get_comp_graph_viz()
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.get_comp_graph_viz()
+        })
     }
     pub fn get_compute_graph(&self) -> Vec<LazyBufferHandle> {
-        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let buffer = buffer.get(self).unwrap().read().unwrap();
-        buffer.topological_sort()
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.topological_sort()
+        })
     }
     pub fn get_data(&self) -> Option<Vec<f32>> {
-        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let buffer = buffer.get(self).unwrap().read().unwrap();
-        buffer.data.clone()
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.data.clone()
+        })
     }
     pub fn get_size(&self) -> usize {
-        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let buffer = buffer.get(self).unwrap().read().unwrap();
-        buffer.size
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.size
+        })
     }
     pub fn get_op(&self) -> LazyOp {
-        let buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let buffer = buffer.get(self).unwrap().read().unwrap();
-        buffer.operation.clone()
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.operation.clone()
+        })
     }
     pub fn clear(&self) {
-        let mut buffer = LAZYBUFFER_REGISTRY.lock().unwrap();
-        let mut buffer = buffer.get_mut(self).unwrap().write().unwrap();
-        buffer.operation = LazyOp::Clear(*self);
+        todo!()
+    }
+    pub fn get_tensor_id(&self) -> Option<TensorId> {
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.parent
+        })
     }
 }

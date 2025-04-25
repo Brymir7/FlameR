@@ -1,6 +1,6 @@
 use ash::{
     Entry,
-    vk::{self, Handle},
+    vk::{self},
 };
 use std::ffi::CString;
 
