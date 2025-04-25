@@ -42,7 +42,11 @@ lazy_static::lazy_static! {
 
 impl fmt::Debug for LazyBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LazyBuffer[{}]", self.id)
+        write!(
+            f,
+            "LazyBuffer[{}] data {:?}",
+            self.id, self.data
+        )
     }
 }
 
@@ -265,9 +269,14 @@ impl LazyBuffer {
                 }
             }
         }
-        if (to_host || matches!(backend.name(), "CPU")) && self.is_dirty { // if cpu its not expensive
+        if (to_host || matches!(backend.name(), "CPU")) && self.is_dirty {
+            // if cpu its not expensive
             let result_handle = buffer_handles.get(&self.id).unwrap();
             let result_data = backend.to_host(result_handle, self.size);
+            println!(
+                "LazyBuffer[{}] realized to host with size {}",
+                self.id, self.size
+            );
             self.data = Some(result_data);
         }
         // Return used buffers to cache when done
