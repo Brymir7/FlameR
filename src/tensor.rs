@@ -142,11 +142,6 @@ impl Tensor {
         for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
             if tensor.gradient.is_some() {
                 tensor.gradient.as_mut().unwrap().realize(backend, true);
-                println!(
-                    "Tensor ID: {:?}, Gradient: {:?}",
-                    tensor.id,
-                    tensor.gradient.as_ref().unwrap().get_data()
-                );
             }
         }
     }
