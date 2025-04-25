@@ -11,12 +11,13 @@ fn main() {
     let cpu_backend = CPUBackend::new();
     let a = Tensor::new(vec![1.0, 2.0, 3.0]);
     let w = Tensor::new(vec![0.5, 0.5, 0.5]);
-    for _ in 0..10 {
-        let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
-        let predictions = &a * &w;
-        let mut loss = target - predictions;
-        loss.backward(&cpu_backend);
-        println!("a: {:?}", a);
-        // println!("Loss: {:?}", loss);
-    }
+    // for _ in 0..10 {
+    let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
+    let predictions = a * w;
+    let mut loss = target - predictions;
+    loss.backward(&cpu_backend);
+    println!("a: {:?}", a);
+    println!("w: {:?}", w);
+    // println!("Loss: {:?}", loss);
+    // }
 }

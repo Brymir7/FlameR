@@ -1,3 +1,4 @@
+use core::panic;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -110,16 +111,12 @@ impl LazyBuffer {
     pub fn from_operation(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
         // Determine size based on the operation
         let size = match &op {
-            LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
-            LazyOp::Clear(a) => {
-                let a_size =
-                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
-                a_size
-            }
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
             | LazyOp::Divide(a, b) => {
+                println!("Operation: {:?}", op);
+                println!("curr reg: {:?}", LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.len()));
                 let a_size =
                     LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
                 let b_size =
@@ -128,6 +125,9 @@ impl LazyBuffer {
                     panic!("Size mismatch in operation: {} vs {}", a_size, b_size);
                 }
                 a_size
+            }
+            _ => {
+                panic!("Unsupported operation for size calculation: {:?}", op);
             }
         };
 

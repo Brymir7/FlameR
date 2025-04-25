@@ -1,6 +1,7 @@
 use crate::lazybuffer::{Backend, LazyBuffer, LazyBufferHandle, LazyOp};
 use std::{
     collections::VecDeque,
+    fmt::Debug,
     ops::{Add, Div, Mul, Sub},
     sync::Mutex,
 };
@@ -18,7 +19,7 @@ fn get_next_tensor_id() -> TensorId {
     *counter += 1;
     TensorId(id)
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy)]
 pub struct Tensor {
     pub id: TensorId,
     pub buffer: LazyBufferHandle,
@@ -145,6 +146,11 @@ impl Tensor {
         for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
             if tensor.gradient.is_some() {
                 tensor.gradient.as_mut().unwrap().realize(backend, false);
+                println!(
+                    "Tensor ID: {:?}, Gradient: {:?}",
+                    tensor.id,
+                    tensor.gradient.as_ref().unwrap().get_data()
+                );
             }
         }
     }
@@ -169,7 +175,17 @@ impl Tensor {
         crate::training::free_all_cached_buffers(backend);
     }
 }
-
+impl Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tensor = TENSOR_REGISTRY.lock().unwrap()[self.id.0].clone();
+        f.debug_struct("Tensor")
+            .field("id", &tensor.id)
+            .field("buffer", &tensor.buffer.get_data())
+            .field("gradient", &tensor.gradient.as_ref().map(|g| g.get_data()))
+            .field("requires_grad", &tensor.requires_grad)
+            .finish()
+    }
+}
 impl Add for Tensor {
     type Output = Self;
     fn add(self, other: Self) -> Self::Output {
