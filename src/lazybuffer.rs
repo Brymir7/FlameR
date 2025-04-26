@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::sync::Mutex;
+
 
 use crate::tensor::TensorId;
 
@@ -49,7 +49,6 @@ pub struct LazyBuffer {
     pub size: usize,
     pub operation: LazyOp,
     pub device_buffer: Option<BufferHandle>,
-    pub is_dirty: bool,
 }
 
 thread_local! {
@@ -85,7 +84,6 @@ impl LazyBuffer {
             size,
             operation: LazyOp::Creation,
             device_buffer: None,
-            is_dirty: true,
             id,
             parent: Some(tensor_id),
         };
@@ -103,7 +101,6 @@ impl LazyBuffer {
             size,
             operation: LazyOp::Creation,
             device_buffer: None,
-            is_dirty: true,
             id,
             parent: None,
         };
@@ -138,7 +135,6 @@ impl LazyBuffer {
             size,
             operation: op,
             device_buffer: None,
-            is_dirty: true,
             id,
             parent: Some(tensor_id),
         };
@@ -177,7 +173,6 @@ impl LazyBuffer {
             size,
             operation: op,
             device_buffer: None,
-            is_dirty: true,
             id,
             parent: None,
         };
@@ -337,7 +332,7 @@ impl LazyBuffer {
             }
         }
 
-        if (to_host || matches!(backend.name(), "CPU")) && self.is_dirty {
+        if (to_host || matches!(backend.name(), "CPU")) {
             let result_handle = buffer_handles.get(&self.id).unwrap();
             let result_data = backend.to_host(result_handle, self.size);
             self.data = Some(result_data);
@@ -362,7 +357,6 @@ impl LazyBufferHandle {
             LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
                 let buffer = registry.get_mut(lazy_buffer.0).unwrap();
                 buffer.device_buffer = Some(device_handle.clone());
-                buffer.is_dirty = false;
             });
         }
     }
@@ -377,7 +371,6 @@ impl LazyBufferHandle {
             let buffer = registry.get_mut(self.0).unwrap();
             let device_data = backend.read_buffer(&buffer.device_buffer.as_ref().unwrap());
             buffer.data = Some(device_data.clone());
-            buffer.is_dirty = false;
             device_data
         })
     }

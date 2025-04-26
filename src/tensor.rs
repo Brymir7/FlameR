@@ -128,13 +128,13 @@ impl Tensor {
                     {
                         let a_tensor =
                             &mut TENSOR_REGISTRY.lock().unwrap()[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(chain_rule_gradient.clone());
-                        queue.push_back((a_tensor.clone(), chain_rule_gradient.clone()));
+                        a_tensor.gradient = Some(chain_rule_gradient);
+                        queue.push_back((a_tensor.clone(), chain_rule_gradient));
                     }
                     let b_tensor =
                         &mut TENSOR_REGISTRY.lock().unwrap()[b.get_tensor_id().unwrap().0];
-                    b_tensor.gradient = Some(chain_rule_gradient.clone());
-                    queue.push_back((b_tensor.clone(), chain_rule_gradient.clone()));
+                    b_tensor.gradient = Some(chain_rule_gradient);
+                    queue.push_back((b_tensor.clone(), chain_rule_gradient));
                 }
                 LazyOp::Subtract(a, b) => {
                     {
@@ -162,14 +162,14 @@ impl Tensor {
                         let a_tensor =
                             &mut TENSOR_REGISTRY.lock().unwrap()[a.get_tensor_id().unwrap().0];
                         a_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
-                            LazyOp::Multiply(b.clone(), chain_rule_gradient.clone()),
+                            LazyOp::Multiply(b, chain_rule_gradient.clone()),
                         ));
                         queue.push_back((a_tensor.clone(), a_tensor.gradient.clone().unwrap()));
                     }
                     let b_tensor =
                         &mut TENSOR_REGISTRY.lock().unwrap()[b.get_tensor_id().unwrap().0];
                     b_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
-                        LazyOp::Multiply(a.clone(), chain_rule_gradient),
+                        LazyOp::Multiply(a, chain_rule_gradient),
                     ));
                     queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
                 }

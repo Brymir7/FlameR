@@ -8,14 +8,16 @@ use crate::tensor::Tensor;
 fn main() {
     let vulkan_backend = VulkanBackend::new("Vulkano Test");
     let cpu_backend = CPUBackend::new();
-    let a = Tensor::new(vec![1.0, 2.0, 3.0]);
-    let w = Tensor::new(vec![0.5, 0.5, 0.5]);
+    let mut a = Tensor::new(vec![1.0, 2.0, 3.0]);
+    let mut w = Tensor::new(vec![0.5, 0.5, 0.5]);
+
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
-    for _ in 0..5 {
+    for _ in 0..55 {
         let predictions = a * w ;
         let mut loss = target - predictions;
-        loss.apply_backward(&vulkan_backend, 0.01);
-        println!("a : {:?}", a.buffer.get_data(&vulkan_backend));
-        println!("Loss: {:?}", loss.buffer.get_data(&vulkan_backend));
+        loss.apply_backward(&cpu_backend, 0.01);
+        // println!("a : {:?}", a.buffer.get_data(&cpu_backend));
+        // println!("w : {:?}", w.buffer.get_data(&cpu_backend));
+        println!("Loss: {:?}", loss.buffer.get_data(&cpu_backend));
     }
 }
