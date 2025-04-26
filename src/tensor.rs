@@ -165,6 +165,7 @@ impl Tensor {
 impl Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tensor = TENSOR_REGISTRY.lock().unwrap()[self.id.0].clone();
+        println!("tensor buffer id: {:?}", tensor.buffer);
         f.debug_struct("Tensor")
             .field("id", &tensor.id)
             .field("buffer", &tensor.buffer.get_data())

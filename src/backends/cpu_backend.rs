@@ -17,9 +17,9 @@ impl CPUBackend {
 }
 
 impl Backend for CPUBackend {
-    fn allocate_buffer(&self, size: usize) -> BufferHandle {
+    fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle {
         let handle = BufferHandle {
-            id: crate::lazybuffer::get_next_buffer_id(),
+            id: lazy_buffer,
             size,
         };
 

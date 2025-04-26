@@ -21,7 +21,7 @@ pub enum LazyOp {
 }
 
 pub trait Backend {
-    fn allocate_buffer(&self, size: usize) -> BufferHandle;
+    fn allocate_buffer(&self, lazyBuffer: LazyBufferHandle, size: usize) -> BufferHandle;
     fn free_buffer(&self, handle: &BufferHandle);
     fn drop(&self);
     fn to_device(&self, data: &[f32], handle: &BufferHandle);
@@ -60,15 +60,17 @@ impl fmt::Debug for LazyBuffer {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref NEXT_BUFFER_ID: Mutex<usize> = Mutex::new(0);
+thread_local! {
+    static  NEXT_BUFFER_ID: RefCell<usize> = RefCell::new(0);
 }
 
 pub fn get_next_buffer_id() -> LazyBufferHandle {
-    let mut id = NEXT_BUFFER_ID.lock().unwrap();
-    let current = *id;
-    *id += 1;
-    LazyBufferHandle(current)
+    let id = NEXT_BUFFER_ID.with_borrow_mut(|id| {
+        let current = *id;
+        *id += 1;
+        current
+    });
+    LazyBufferHandle(id)
 }
 
 impl LazyBuffer {
@@ -132,8 +134,9 @@ impl LazyBuffer {
                 panic!("Unsupported operation for size calculation: {:?}", op);
             }
         };
-
         let id = get_next_buffer_id();
+        println!("LazyBuffer ID: {:?}", id);
+        println!("Operation: {:?}", op);
 
         let buffer = LazyBuffer {
             data: None,
@@ -301,14 +304,12 @@ impl LazyBuffer {
         let order = Self::topological_sort(&deps);
         let mut buffer_handles = HashMap::new();
 
-        // Allocate buffers
         for &id in &order {
             let node = deps.get(&id).unwrap();
-            let handle = backend.allocate_buffer(node.size);
+            let handle = backend.allocate_buffer(id, node.size);
             buffer_handles.insert(id, handle);
         }
 
-        // Process operations
         for &id in &order {
             let node = deps.get(&id).unwrap();
             let result_handle = buffer_handles.get(&id).unwrap();
