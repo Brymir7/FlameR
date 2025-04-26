@@ -16,8 +16,6 @@ fn main() {
         let predictions = a * w ;
         let mut loss = target - predictions;
         loss.apply_backward(&cpu_backend, 0.01);
-        // println!("a : {:?}", a.buffer.get_data(&cpu_backend));
-        // println!("w : {:?}", w.buffer.get_data(&cpu_backend));
         println!("Loss: {:?}", loss.buffer.get_data(&cpu_backend));
     }
 }

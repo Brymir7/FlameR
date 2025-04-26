@@ -4,15 +4,20 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 
-
 use crate::tensor::TensorId;
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct LazyBufferHandle(pub usize);
 pub const LAZYBUFFER_HANDLE_NULL: LazyBufferHandle = LazyBufferHandle(usize::MAX);
 #[derive(Debug, Clone)]
+pub enum CreationType {
+    Random,
+    RawData(Box<[f32]>),
+    Created,
+}
+#[derive(Debug, Clone)]
 pub enum LazyOp {
-    Creation,
+    Creation(CreationType),
     Clear(LazyBufferHandle),
     Add(LazyBufferHandle, LazyBufferHandle),
     Subtract(LazyBufferHandle, LazyBufferHandle),
@@ -45,7 +50,6 @@ pub struct BufferHandle {
 pub struct LazyBuffer {
     pub id: LazyBufferHandle,
     pub parent: Option<TensorId>,
-    pub data: Option<Vec<f32>>,
     pub size: usize,
     pub operation: LazyOp,
     pub device_buffer: Option<BufferHandle>,
@@ -53,12 +57,6 @@ pub struct LazyBuffer {
 
 thread_local! {
     pub static LAZYBUFFER_REGISTRY: RefCell<Vec<LazyBuffer>> = RefCell::new(Vec::new());
-}
-
-impl fmt::Debug for LazyBuffer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LazyBuffer[{:?}] data {:?}", self.id, self.data)
-    }
 }
 
 thread_local! {
@@ -78,11 +76,9 @@ impl LazyBuffer {
     pub fn new(tensor_id: TensorId, data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
         let id = get_next_buffer_id();
-
         let buffer = LazyBuffer {
-            data: Some(data),
             size,
-            operation: LazyOp::Creation,
+            operation: LazyOp::Creation(CreationType::RawData(data.into_boxed_slice())),
             device_buffer: None,
             id,
             parent: Some(tensor_id),
@@ -95,11 +91,9 @@ impl LazyBuffer {
     pub fn without_parent(data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
         let id = get_next_buffer_id();
-
         let buffer = LazyBuffer {
-            data: Some(data),
             size,
-            operation: LazyOp::Creation,
+            operation: LazyOp::Creation(CreationType::RawData(data.into_boxed_slice())),
             device_buffer: None,
             id,
             parent: None,
@@ -131,7 +125,6 @@ impl LazyBuffer {
         let id = get_next_buffer_id();
 
         let buffer = LazyBuffer {
-            data: None,
             size,
             operation: op,
             device_buffer: None,
@@ -145,7 +138,7 @@ impl LazyBuffer {
     }
     pub fn from_operation_no_parent(op: LazyOp) -> LazyBufferHandle {
         let size = match &op {
-            LazyOp::Creation => 0, // This shouldn't happen but is here for completeness
+            LazyOp::Creation(CreationType::RawData(data)) => data.len(),
             LazyOp::Clear(a) => {
                 let a_size =
                     LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
@@ -164,12 +157,14 @@ impl LazyBuffer {
                 }
                 a_size
             }
+            _ => {
+                panic!("Unsupported operation for size calculation: {:?}", op);
+            }
         };
 
         let id = get_next_buffer_id();
 
         let buffer = LazyBuffer {
-            data: None,
             size,
             operation: op,
             device_buffer: None,
@@ -183,7 +178,7 @@ impl LazyBuffer {
     }
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
-            LazyOp::Creation => format!("Data[{:?}]", self.id),
+            LazyOp::Creation(_) => format!("Data[{:?}]", self.id),
             LazyOp::Clear(_) => format!("Clear[{:?}]", self.id),
             LazyOp::Add(a, b) => format!("({}+{})", a.get_comp_graph_viz(), b.get_comp_graph_viz()),
             LazyOp::Subtract(a, b) => {
@@ -217,7 +212,7 @@ impl LazyBuffer {
                 .with_borrow(|registry| registry.get(current_id.0).unwrap().clone());
 
             match &current.operation {
-                LazyOp::Creation | LazyOp::Clear(_) => {
+                LazyOp::Creation(_) | LazyOp::Clear(_) => {
                     deps.insert(current_id, current);
                 }
                 LazyOp::Add(a, b)
@@ -256,7 +251,7 @@ impl LazyBuffer {
 
                 let node = deps.get(&node_id).unwrap();
                 match &node.operation {
-                    LazyOp::Creation | LazyOp::Clear(_) => {}
+                    LazyOp::Creation(_) | LazyOp::Clear(_) => {}
                     LazyOp::Add(a, b)
                     | LazyOp::Subtract(a, b)
                     | LazyOp::Multiply(a, b)
@@ -301,11 +296,18 @@ impl LazyBuffer {
             let result_handle = buffer_handles.get(&id).unwrap();
 
             match &node.operation {
-                LazyOp::Creation => {
-                    if let Some(data) = &node.data {
-                        backend.to_device(data, result_handle);
+                LazyOp::Creation(creation_type) => match creation_type {
+                    CreationType::Random => {
+                        backend.to_device(&vec![0.0; node.size], result_handle);
                     }
-                }
+                    CreationType::RawData(data) => {
+                        backend.to_device(&data, result_handle);
+                    }
+                    CreationType::Created => {
+                        // buffer has been created already reuse it using handle now
+                        continue;
+                    }
+                },
                 LazyOp::Add(a, b) => {
                     let a_handle = buffer_handles.get(&a).unwrap();
                     let b_handle = buffer_handles.get(&b).unwrap();
@@ -331,12 +333,6 @@ impl LazyBuffer {
                 }
             }
         }
-
-        if (to_host || matches!(backend.name(), "CPU")) {
-            let result_handle = buffer_handles.get(&self.id).unwrap();
-            let result_data = backend.to_host(result_handle, self.size);
-            self.data = Some(result_data);
-        }
         return buffer_handles;
     }
 }
@@ -357,6 +353,13 @@ impl LazyBufferHandle {
             LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
                 let buffer = registry.get_mut(lazy_buffer.0).unwrap();
                 buffer.device_buffer = Some(device_handle.clone());
+                match &mut buffer.operation {
+                    LazyOp::Creation(CreationType::Random)
+                    | LazyOp::Creation(CreationType::RawData(_)) => {
+                        buffer.operation = LazyOp::Creation(CreationType::Created);
+                    }
+                    _ => {}
+                }
             });
         }
     }
@@ -370,7 +373,6 @@ impl LazyBufferHandle {
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
             let buffer = registry.get_mut(self.0).unwrap();
             let device_data = backend.read_buffer(&buffer.device_buffer.as_ref().unwrap());
-            buffer.data = Some(device_data.clone());
             device_data
         })
     }
