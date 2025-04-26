@@ -15,7 +15,7 @@ fn main() {
     for _ in 0..55 {
         let predictions = a * w ;
         let mut loss = target - predictions;
-        loss.apply_backward(&cpu_backend, 0.01);
-        println!("Loss: {:?}", loss.buffer.get_data(&cpu_backend));
+        loss.apply_backward(&vulkan_backend, 0.01);
+        println!("Loss: {:?}", loss.buffer.get_data(&vulkan_backend));
     }
 }

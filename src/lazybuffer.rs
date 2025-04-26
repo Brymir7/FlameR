@@ -1,20 +1,19 @@
 use core::panic;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::hash::Hash;
 
 use crate::tensor::TensorId;
 
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct LazyBufferHandle(pub usize);
 pub const LAZYBUFFER_HANDLE_NULL: LazyBufferHandle = LazyBufferHandle(usize::MAX);
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CreationType {
     Random,
     RawData(Box<[f32]>),
     Created,
 }
+
 #[derive(Debug, Clone)]
 pub enum LazyOp {
     Creation(CreationType),

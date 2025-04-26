@@ -165,6 +165,7 @@ impl Backend for VulkanBackend {
                 size: buffer.size as usize,
             };
         }
+        println!("Allocating buffer with ID {:?}", lazy_buffer);
         let buffer_size = (size * size_of::<f32>()) as u64;
         let buffer = self.vulkan.create_gpu_buffer(buffer_size);
 

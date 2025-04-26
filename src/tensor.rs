@@ -1,23 +1,26 @@
 use crate::lazybuffer::{Backend, LazyBuffer, LazyBufferHandle, LazyOp};
 use std::{
-    collections::VecDeque,
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
     sync::Mutex,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TensorId(usize);
-lazy_static::lazy_static! {
-    static ref TENSOR_REGISTRY: Mutex<Vec<Tensor>> = Mutex::new(Vec::new());
+thread_local! {
+    static  TENSOR_REGISTRY: RefCell<Vec<Tensor>> = RefCell::new(Vec::new());
+    static  OP_CACHE : RefCell<HashMap<(LazyBufferHandle, LazyBufferHandle), TensorId>> = RefCell::new(HashMap::new());
 }
-lazy_static::lazy_static! {
-    static ref TENSOR_ID_COUNTER: Mutex<usize> = Mutex::new(0);
+thread_local! {
+    static TENSOR_ID_COUNTER: RefCell<usize> = RefCell  ::new(0);
 }
 fn get_next_tensor_id() -> TensorId {
-    let mut counter = TENSOR_ID_COUNTER.lock().unwrap();
-    let id = *counter;
-    *counter += 1;
-    TensorId(id)
+    TENSOR_ID_COUNTER.with_borrow_mut(|c| {
+        let id = *c;
+        *c += 1;
+        TensorId(id)
+    })
 }
 #[derive(Clone, Copy)]
 pub struct Tensor {
@@ -36,7 +39,9 @@ impl Tensor {
             gradient: None,
             requires_grad: true,
         };
-        TENSOR_REGISTRY.lock().unwrap().push(t.clone());
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            r.push(t.clone());
+        });
         t
     }
     pub fn without_grad(data: Vec<f32>) -> Self {
@@ -47,11 +52,24 @@ impl Tensor {
             gradient: None,
             requires_grad: false,
         };
-        TENSOR_REGISTRY.lock().unwrap().push(t.clone());
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            r.push(t.clone());
+        });
         t
     }
 
     fn from_operation(op: LazyOp) -> Self {
+        match op {
+            LazyOp::Add(a, b)
+            | LazyOp::Subtract(a, b)
+            | LazyOp::Multiply(a, b)
+            | LazyOp::Divide(a, b) => {
+                if let Some(id) = OP_CACHE.with_borrow_mut(|c| c.get(&(a, b)).cloned()) {
+                    return TENSOR_REGISTRY.with_borrow(|r| r[id.0].clone());
+                }
+            }
+            _ => {}
+        }
         let id = get_next_tensor_id();
         let t = Tensor {
             id,
@@ -59,7 +77,21 @@ impl Tensor {
             gradient: None,
             requires_grad: true,
         };
-        TENSOR_REGISTRY.lock().unwrap().push(t.clone());
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            r.push(t.clone());
+        });
+        match t.buffer.get_op() {
+            LazyOp::Add(a, b)
+            | LazyOp::Subtract(a, b)
+            | LazyOp::Multiply(a, b)
+            | LazyOp::Divide(a, b) => {
+                OP_CACHE.with_borrow_mut(|c| {
+                    c.insert((a, b), id);
+                });
+            }
+            _ => {}
+        }
+
         t
     }
     pub fn realize(&mut self, backend: &dyn Backend) {
@@ -76,37 +108,39 @@ impl Tensor {
         self.backward(backend);
         let temp_buffer = backend
             .allocate_temporary_buffer(&vec![lr; self.buffer.get_size()], self.buffer.get_size());
-        for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
-            if tensor.gradient.is_some() {
-                backend.multiply(
-                    &tensor
-                        .gradient
-                        .as_ref()
-                        .unwrap()
-                        .get_device_handle()
-                        .unwrap(),
-                    &temp_buffer,
-                    &tensor
-                        .gradient
-                        .as_ref()
-                        .unwrap()
-                        .get_device_handle()
-                        .unwrap(),
-                    tensor.buffer.get_size(),
-                );
-                backend.subtract(
-                    &tensor.buffer.get_device_handle().unwrap(),
-                    &tensor
-                        .gradient
-                        .as_ref()
-                        .unwrap()
-                        .get_device_handle()
-                        .unwrap(),
-                    &tensor.buffer.get_device_handle().unwrap(),
-                    tensor.buffer.get_size(),
-                );
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            for tensor in r {
+                if tensor.gradient.is_some() {
+                    backend.multiply(
+                        &tensor
+                            .gradient
+                            .as_ref()
+                            .unwrap()
+                            .get_device_handle()
+                            .unwrap(),
+                        &temp_buffer,
+                        &tensor
+                            .gradient
+                            .as_ref()
+                            .unwrap()
+                            .get_device_handle()
+                            .unwrap(),
+                        tensor.buffer.get_size(),
+                    );
+                    backend.subtract(
+                        &tensor.buffer.get_device_handle().unwrap(),
+                        &tensor
+                            .gradient
+                            .as_ref()
+                            .unwrap()
+                            .get_device_handle()
+                            .unwrap(),
+                        &tensor.buffer.get_device_handle().unwrap(),
+                        tensor.buffer.get_size(),
+                    );
+                }
             }
-        }
+        });
     }
     // need to accumulate here otherwise residual gradient will be lost
     pub fn backward(&mut self, backend: &dyn Backend) {
@@ -125,27 +159,24 @@ impl Tensor {
             if !curr_tensor.requires_grad {}
             match curr_tensor.buffer.get_op() {
                 LazyOp::Add(a, b) => {
-                    {
-                        let a_tensor =
-                            &mut TENSOR_REGISTRY.lock().unwrap()[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(chain_rule_gradient);
-                        queue.push_back((a_tensor.clone(), chain_rule_gradient));
-                    }
-                    let b_tensor =
-                        &mut TENSOR_REGISTRY.lock().unwrap()[b.get_tensor_id().unwrap().0];
-                    b_tensor.gradient = Some(chain_rule_gradient);
-                    queue.push_back((b_tensor.clone(), chain_rule_gradient));
+                    TENSOR_REGISTRY.with_borrow_mut(|r| {
+                        let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
+                        a_tensor.gradient = Some(chain_rule_gradient.clone());
+                        queue.push_back((a_tensor.clone(), chain_rule_gradient.clone()));
+                    });
+
+                    TENSOR_REGISTRY.with_borrow_mut(|r| {
+                        let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
+                        b_tensor.gradient = Some(chain_rule_gradient.clone());
+                        queue.push_back((b_tensor.clone(), chain_rule_gradient));
+                    });
                 }
                 LazyOp::Subtract(a, b) => {
-                    {
-                        let a_tensor =
-                            &mut TENSOR_REGISTRY.lock().unwrap()[a.get_tensor_id().unwrap().0];
+                    TENSOR_REGISTRY.with_borrow_mut(|r| {
+                        let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
                         a_tensor.gradient = Some(chain_rule_gradient);
                         queue.push_back((a_tensor.clone(), chain_rule_gradient));
-                    }
-                    {
-                        let b_tensor =
-                            &mut TENSOR_REGISTRY.lock().unwrap()[b.get_tensor_id().unwrap().0];
+                        let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
                         b_tensor.gradient =
                             Some(LazyBuffer::from_operation_no_parent(LazyOp::Multiply(
                                 chain_rule_gradient,
@@ -155,32 +186,34 @@ impl Tensor {
                                 ]),
                             )));
                         queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
-                    }
+                    });
                 }
                 LazyOp::Multiply(a, b) => {
-                    {
-                        let a_tensor =
-                            &mut TENSOR_REGISTRY.lock().unwrap()[a.get_tensor_id().unwrap().0];
+                    TENSOR_REGISTRY.with_borrow_mut(|r| {
+                        let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
                         a_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
                             LazyOp::Multiply(b, chain_rule_gradient.clone()),
                         ));
                         queue.push_back((a_tensor.clone(), a_tensor.gradient.clone().unwrap()));
-                    }
-                    let b_tensor =
-                        &mut TENSOR_REGISTRY.lock().unwrap()[b.get_tensor_id().unwrap().0];
-                    b_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
-                        LazyOp::Multiply(a, chain_rule_gradient),
-                    ));
-                    queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
+                    });
+                    TENSOR_REGISTRY.with_borrow_mut(|r| {
+                        let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
+                        b_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
+                            LazyOp::Multiply(a, chain_rule_gradient),
+                        ));
+                        queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
+                    });
                 }
                 _ => {}
             }
         }
-        for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
-            if tensor.gradient.is_some() {
-                tensor.gradient.as_mut().unwrap().realize(backend, true);
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            for tensor in r {
+                if tensor.gradient.is_some() {
+                    tensor.gradient.as_mut().unwrap().realize(backend, false);
+                }
             }
-        }
+        });
     }
     pub fn run_training_loop<F>(backend: &dyn Backend, iterations: usize, mut step_fn: F)
     where
@@ -201,13 +234,15 @@ impl Tensor {
 }
 impl Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tensor = TENSOR_REGISTRY.lock().unwrap()[self.id.0].clone();
-        f.debug_struct("Tensor")
-            .field("id", &tensor.id)
-            .field("buffer_id", &tensor.buffer)
-            .field("gradient", &tensor.gradient)
-            .field("requires_grad", &tensor.requires_grad)
-            .finish()
+        TENSOR_REGISTRY.with_borrow(|r| {
+            let tensor = &r[self.id.0];
+            f.debug_struct("Tensor")
+                .field("id", &tensor.id)
+                .field("buffer_id", &tensor.buffer)
+                .field("gradient", &tensor.gradient)
+                .field("requires_grad", &tensor.requires_grad)
+                .finish()
+        })
     }
 }
 impl Add for Tensor {
