@@ -71,12 +71,30 @@ impl Tensor {
     pub fn begin_training_loop(backend: &dyn Backend) {}
 
     pub fn end_training_loop(backend_name: &str) {}
-    pub fn apply_backward(&mut self, backend: &dyn Backend) {
+    pub fn apply_backward(&mut self, backend: &dyn Backend, lr: f32) {
         self.realize(backend);
         self.backward(backend);
+        let temp_buffer = backend
+            .allocate_temporary_buffer(&vec![lr; self.buffer.get_size()], self.buffer.get_size());
         for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
             if tensor.gradient.is_some() {
-                backend.add(
+                backend.multiply(
+                    &tensor
+                        .gradient
+                        .as_ref()
+                        .unwrap()
+                        .get_device_handle()
+                        .unwrap(),
+                    &temp_buffer,
+                    &tensor
+                        .gradient
+                        .as_ref()
+                        .unwrap()
+                        .get_device_handle()
+                        .unwrap(),
+                    tensor.buffer.get_size(),
+                );
+                backend.subtract(
                     &tensor.buffer.get_device_handle().unwrap(),
                     &tensor
                         .gradient
@@ -90,6 +108,7 @@ impl Tensor {
             }
         }
     }
+    // need to accumulate here otherwise residual gradient will be lost
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();

@@ -9,7 +9,7 @@ use crate::tensor::TensorId;
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct LazyBufferHandle(pub usize);
-
+pub const LAZYBUFFER_HANDLE_NULL: LazyBufferHandle = LazyBufferHandle(usize::MAX);
 #[derive(Debug, Clone)]
 pub enum LazyOp {
     Creation,
@@ -22,6 +22,7 @@ pub enum LazyOp {
 
 pub trait Backend {
     fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle;
+    fn allocate_temporary_buffer(&self, data: &[f32], size: usize) -> BufferHandle;
     fn read_buffer(&self, handle: &BufferHandle) -> Vec<f32>;
     fn free_buffer(&self, handle: &BufferHandle);
     fn drop(&self);

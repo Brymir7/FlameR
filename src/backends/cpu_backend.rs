@@ -1,4 +1,4 @@
-use crate::lazybuffer::{Backend, BufferHandle, LazyBufferHandle};
+use crate::lazybuffer::{Backend, BufferHandle, LAZYBUFFER_HANDLE_NULL, LazyBufferHandle};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -32,6 +32,17 @@ impl Backend for CPUBackend {
         // Initialize with zeros
         let mut buffers = self.buffers.lock().unwrap();
         buffers.insert(handle.id, vec![0.0; size]);
+
+        handle
+    }
+    fn allocate_temporary_buffer(&self, data: &[f32], size: usize) -> BufferHandle {
+        let handle = BufferHandle {
+            id: LAZYBUFFER_HANDLE_NULL,
+            size,
+        };
+
+        let mut buffers = self.buffers.lock().unwrap();
+        buffers.insert(handle.id, data.to_vec());
 
         handle
     }

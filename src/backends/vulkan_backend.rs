@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Mutex;
 
-use crate::lazybuffer::{Backend, BufferHandle, LazyBufferHandle};
+use crate::lazybuffer::{Backend, BufferHandle, LAZYBUFFER_HANDLE_NULL, LazyBufferHandle};
 use crate::vulkan::{Buffer, VulkanBackend as VulkanCore};
 
 pub struct VulkanBackend {
@@ -146,6 +146,7 @@ impl VulkanBackend {
                 }
             "#
             }
+
             _ => panic!("Unknown operation: {}", operation),
         };
         let pipeline = self.vulkan.create_pipeline_for_shader(shader_src);
@@ -173,6 +174,17 @@ impl Backend for VulkanBackend {
         };
 
         self.buffers.lock().unwrap().insert(handle.id, buffer);
+        handle
+    }
+    fn allocate_temporary_buffer(&self, data: &[f32], size: usize) -> BufferHandle {
+        let buffer_size = (size * size_of::<f32>()) as u64;
+        let buffer = self.vulkan.create_gpu_buffer(buffer_size);
+        let handle = BufferHandle {
+            id: LAZYBUFFER_HANDLE_NULL,
+            size,
+        };
+        self.buffers.lock().unwrap().insert(handle.id, buffer);
+        self.to_device(data, &handle);
         handle
     }
     fn read_buffer(&self, handle: &BufferHandle) -> Vec<f32> {
