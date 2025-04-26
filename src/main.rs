@@ -2,7 +2,6 @@ pub mod backends;
 pub mod lazybuffer;
 pub mod tensor;
 pub mod vulkan;
-use lazybuffer::LAZYBUFFER_REGISTRY;
 
 use crate::backends::{CPUBackend, VulkanBackend};
 use crate::tensor::Tensor;
@@ -15,9 +14,8 @@ fn main() {
     for _ in 0..10 {
         let predictions = a * w;
         let mut loss = target - predictions;
-        loss.backward(&vulkan_backend);
-        println!("a: {:?}", a);
-        println!("w: {:?}", w);
-        println!("Loss: {:?}", loss);
+        loss.apply_backward(&cpu_backend);
+        println!("a : {:?}", a.buffer.get_data(&cpu_backend));
+        println!("Loss: {:?}", loss.buffer.get_data(&cpu_backend));
     }
 }

@@ -18,6 +18,12 @@ impl CPUBackend {
 
 impl Backend for CPUBackend {
     fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle {
+        if let Some(buffer) = self.buffers.lock().unwrap().get(&lazy_buffer) {
+            return BufferHandle {
+                id: lazy_buffer,
+                size: buffer.len(),
+            };
+        }
         let handle = BufferHandle {
             id: lazy_buffer,
             size,
@@ -29,7 +35,14 @@ impl Backend for CPUBackend {
 
         handle
     }
-
+    fn read_buffer(&self, handle: &BufferHandle) -> Vec<f32> {
+        let buffers = self.buffers.lock().unwrap();
+        if let Some(buffer) = buffers.get(&handle.id) {
+            buffer.clone()
+        } else {
+            panic!("Buffer with ID {:?} not found", handle.id);
+        }
+    }
     fn free_buffer(&self, handle: &BufferHandle) {
         let mut buffers = self.buffers.lock().unwrap();
         buffers.remove(&handle.id);

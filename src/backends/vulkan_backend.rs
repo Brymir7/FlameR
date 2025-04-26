@@ -158,6 +158,12 @@ impl VulkanBackend {
 
 impl Backend for VulkanBackend {
     fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle {
+        if let Some(buffer) = self.buffers.lock().unwrap().get(&lazy_buffer) {
+            return BufferHandle {
+                id: lazy_buffer,
+                size: buffer.size as usize,
+            };
+        }
         let buffer_size = (size * size_of::<f32>()) as u64;
         let buffer = self.vulkan.create_gpu_buffer(buffer_size);
 
@@ -169,7 +175,31 @@ impl Backend for VulkanBackend {
         self.buffers.lock().unwrap().insert(handle.id, buffer);
         handle
     }
+    fn read_buffer(&self, handle: &BufferHandle) -> Vec<f32> {
+        let buffers = self.buffers.lock().unwrap();
+        if let Some(buffer) = buffers.get(&handle.id) {
+            let buffer_size = (handle.size * size_of::<f32>()) as u64;
+            let staging_buffer = self.vulkan.create_staging_buffer(buffer_size);
 
+            let fence = self
+                .vulkan
+                .copy_buffer(buffer, &staging_buffer, buffer_size);
+            self.vulkan.wait_for_fence(fence);
+
+            let result = self.vulkan.read_buffer::<f32>(&staging_buffer, handle.size);
+
+            unsafe {
+                self.vulkan
+                    .device
+                    .destroy_buffer(staging_buffer.buffer, None);
+                self.vulkan.device.free_memory(staging_buffer.memory, None);
+            }
+
+            result
+        } else {
+            panic!("Buffer with ID {:?} not found", handle.id);
+        }
+    }
     fn free_buffer(&self, handle: &BufferHandle) {
         let mut buffers = self.buffers.lock().unwrap();
         if let Some(buffer) = buffers.remove(&handle.id) {

@@ -71,7 +71,25 @@ impl Tensor {
     pub fn begin_training_loop(backend: &dyn Backend) {}
 
     pub fn end_training_loop(backend_name: &str) {}
-
+    pub fn apply_backward(&mut self, backend: &dyn Backend) {
+        self.realize(backend);
+        self.backward(backend);
+        for tensor in TENSOR_REGISTRY.lock().unwrap().iter_mut() {
+            if tensor.gradient.is_some() {
+                backend.add(
+                    &tensor.buffer.get_device_handle().unwrap(),
+                    &tensor
+                        .gradient
+                        .as_ref()
+                        .unwrap()
+                        .get_device_handle()
+                        .unwrap(),
+                    &tensor.buffer.get_device_handle().unwrap(),
+                    tensor.buffer.get_size(),
+                );
+            }
+        }
+    }
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();
@@ -165,11 +183,10 @@ impl Tensor {
 impl Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tensor = TENSOR_REGISTRY.lock().unwrap()[self.id.0].clone();
-        println!("tensor buffer id: {:?}", tensor.buffer);
         f.debug_struct("Tensor")
             .field("id", &tensor.id)
-            .field("buffer", &tensor.buffer.get_data())
-            .field("gradient", &tensor.gradient.as_ref().map(|g| g.get_data()))
+            .field("buffer_id", &tensor.buffer)
+            .field("gradient", &tensor.gradient)
             .field("requires_grad", &tensor.requires_grad)
             .finish()
     }

@@ -21,7 +21,8 @@ pub enum LazyOp {
 }
 
 pub trait Backend {
-    fn allocate_buffer(&self, lazyBuffer: LazyBufferHandle, size: usize) -> BufferHandle;
+    fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle;
+    fn read_buffer(&self, handle: &BufferHandle) -> Vec<f32>;
     fn free_buffer(&self, handle: &BufferHandle);
     fn drop(&self);
     fn to_device(&self, data: &[f32], handle: &BufferHandle);
@@ -46,7 +47,7 @@ pub struct LazyBuffer {
     pub data: Option<Vec<f32>>,
     pub size: usize,
     pub operation: LazyOp,
-    pub gpu_buffer: Option<BufferHandle>,
+    pub device_buffer: Option<BufferHandle>,
     pub is_dirty: bool,
 }
 
@@ -82,7 +83,7 @@ impl LazyBuffer {
             data: Some(data),
             size,
             operation: LazyOp::Creation,
-            gpu_buffer: None,
+            device_buffer: None,
             is_dirty: true,
             id,
             parent: Some(tensor_id),
@@ -100,7 +101,7 @@ impl LazyBuffer {
             data: Some(data),
             size,
             operation: LazyOp::Creation,
-            gpu_buffer: None,
+            device_buffer: None,
             is_dirty: true,
             id,
             parent: None,
@@ -116,11 +117,6 @@ impl LazyBuffer {
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
             | LazyOp::Divide(a, b) => {
-                println!("Operation: {:?}", op);
-                println!(
-                    "curr reg: {:?}",
-                    LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.len())
-                );
                 let a_size =
                     LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
                 let b_size =
@@ -135,14 +131,12 @@ impl LazyBuffer {
             }
         };
         let id = get_next_buffer_id();
-        println!("LazyBuffer ID: {:?}", id);
-        println!("Operation: {:?}", op);
 
         let buffer = LazyBuffer {
             data: None,
             size,
             operation: op,
-            gpu_buffer: None,
+            device_buffer: None,
             is_dirty: true,
             id,
             parent: Some(tensor_id),
@@ -181,7 +175,7 @@ impl LazyBuffer {
             data: None,
             size,
             operation: op,
-            gpu_buffer: None,
+            device_buffer: None,
             is_dirty: true,
             id,
             parent: None,
@@ -296,11 +290,7 @@ impl LazyBuffer {
         backend: &dyn Backend,
         to_host: bool,
         deps: HashMap<LazyBufferHandle, LazyBuffer>,
-    ) {
-        if let Some(_) = &self.data {
-            return;
-        }
-
+    ) -> HashMap<LazyBufferHandle, BufferHandle> {
         let order = Self::topological_sort(&deps);
         let mut buffer_handles = HashMap::new();
 
@@ -351,6 +341,7 @@ impl LazyBuffer {
             let result_data = backend.to_host(result_handle, self.size);
             self.data = Some(result_data);
         }
+        return buffer_handles;
     }
 }
 
@@ -360,12 +351,19 @@ impl LazyBufferHandle {
             let buffer = registry.get(self.0).unwrap();
             buffer.collect_dependencies()
         });
-
+        let mut buffer_handles: HashMap<LazyBufferHandle, BufferHandle> = HashMap::new();
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
             // Then realize with the collected dependencies
             let buffer = registry.get_mut(self.0).unwrap();
-            buffer.realize_impl(backend, to_host, deps);
+            buffer_handles = buffer.realize_impl(backend, to_host, deps);
         });
+        for (lazy_buffer, device_handle) in buffer_handles.iter() {
+            LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+                let buffer = registry.get_mut(lazy_buffer.0).unwrap();
+                buffer.device_buffer = Some(device_handle.clone());
+                buffer.is_dirty = false;
+            });
+        }
     }
     pub fn get_comp_graph_viz(&self) -> String {
         LAZYBUFFER_REGISTRY.with_borrow(|registry| {
@@ -373,11 +371,13 @@ impl LazyBufferHandle {
             buffer.get_comp_graph_viz()
         })
     }
-
-    pub fn get_data(&self) -> Option<Vec<f32>> {
-        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
-            let buffer = registry.get(self.0).unwrap();
-            buffer.data.clone()
+    pub fn get_data(&self, backend: &dyn Backend) -> Vec<f32> {
+        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+            let buffer = registry.get_mut(self.0).unwrap();
+            let device_data = backend.read_buffer(&buffer.device_buffer.as_ref().unwrap());
+            buffer.data = Some(device_data.clone());
+            buffer.is_dirty = false;
+            device_data
         })
     }
     pub fn get_size(&self) -> usize {
@@ -399,6 +399,12 @@ impl LazyBufferHandle {
         LAZYBUFFER_REGISTRY.with_borrow(|registry| {
             let buffer = registry.get(self.0).unwrap();
             buffer.parent
+        })
+    }
+    pub fn get_device_handle(&self) -> Option<BufferHandle> {
+        LAZYBUFFER_REGISTRY.with_borrow(|registry| {
+            let buffer = registry.get(self.0).unwrap();
+            buffer.device_buffer.clone()
         })
     }
 }
