@@ -14,10 +14,13 @@ fn main() {
     let mut w = Tensor::new(vec![0.5, 0.5, 0.5]);
 
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
-    for _ in 0..1 {
+    Tensor::begin_training_loop(&vulkan_backend);
+    for _ in 0..15 {
         let predictions = a * w;
         let mut loss = (target - predictions) * (target - predictions);
-        loss.apply_backward(&vulkan_backend, 0.01);
+        loss.buffer.realize(&vulkan_backend, false);
+
+        loss.apply_backward(&vulkan_backend, 0.1);
         println!("A {:?}", a);
         println!("Loss: {:?}", loss.buffer.get_data(&vulkan_backend));
     }

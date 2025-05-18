@@ -61,7 +61,14 @@ thread_local! {
 thread_local! {
     static  NEXT_BUFFER_ID: RefCell<usize> = RefCell::new(0);
 }
-
+// todo cache here all ::scratch buffers
+thread_local! {
+    static  SCRATCHPAD_CACHE: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new());
+}
+// todo cache all gradient overwrites here
+thread_local! {
+    static TENSOR_TO_GRADIENT_BUFFER: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new);
+}
 pub fn get_next_buffer_id() -> LazyBufferHandle {
     let id = NEXT_BUFFER_ID.with_borrow_mut(|id| {
         let current = *id;

@@ -30,6 +30,22 @@ pub struct Tensor {
 }
 
 impl Tensor {
+    pub fn storage_len() -> usize {
+        return TENSOR_REGISTRY.with_borrow(|r| r.len());
+    }
+    pub fn begin_training_loop(backend: &dyn Backend) {
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            for tensor in r.iter_mut() {
+                if tensor.requires_grad {
+                    tensor.gradient =
+                        Some(LazyBuffer::scratch(vec![0.0; tensor.buffer.get_size()]));
+                    tensor.gradient.as_ref().unwrap().realize(backend, false);
+                }
+                tensor.buffer.realize(backend, false);
+            }
+        });
+    }
+
     pub fn new(data: Vec<f32>) -> Self {
         let id = get_next_tensor_id();
         let t = Tensor {
@@ -99,9 +115,7 @@ impl Tensor {
     pub fn realize_to_host(&mut self, backend: &dyn Backend) {
         self.buffer.realize(backend, true);
     }
-    pub fn begin_training_loop(backend: &dyn Backend) {}
 
-    pub fn end_training_loop(backend_name: &str) {}
     pub fn apply_backward(&mut self, backend: &dyn Backend, lr: f32) {
         self.realize(backend);
         self.backward(backend);
@@ -145,7 +159,12 @@ impl Tensor {
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();
-        self.gradient = Some(LazyBuffer::scratch(vec![1.0; self.buffer.get_size()]));
+        if self.gradient.is_none() {
+            self.gradient = Some(LazyBuffer::scratch(vec![0.0; self.buffer.get_size()]));
+        } else {
+            let grad_handle = self.gradient.as_ref().unwrap().get_device_handle().unwrap();
+            backend.to_device(&vec![0.0; self.buffer.get_size()], &grad_handle);
+        }
         queue.push_back((
             self.clone(),
             LazyBuffer::scratch(vec![1.0; self.buffer.get_size()]),
