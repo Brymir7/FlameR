@@ -3,6 +3,8 @@ pub mod lazybuffer;
 pub mod tensor;
 pub mod vulkan;
 
+use lazybuffer::LazyBuffer;
+
 use crate::backends::{CPUBackend, VulkanBackend};
 use crate::tensor::Tensor;
 fn main() {
@@ -12,10 +14,13 @@ fn main() {
     let mut w = Tensor::new(vec![0.5, 0.5, 0.5]);
 
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
-    for _ in 0..55 {
-        let predictions = a * w ;
-        let mut loss = target - predictions;
+    for _ in 0..1 {
+        LazyBuffer::start_loop();
+        let predictions = a * w;
+        let mut loss = (target - predictions) * (target - predictions);
         loss.apply_backward(&vulkan_backend, 0.01);
+        println!("A {:?}", a);
         println!("Loss: {:?}", loss.buffer.get_data(&vulkan_backend));
+        LazyBuffer::end_loop();
     }
 }

@@ -4,7 +4,6 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
-    sync::Mutex,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TensorId(usize);
@@ -142,17 +141,14 @@ impl Tensor {
             }
         });
     }
-    // need to accumulate here otherwise residual gradient will be lost
+    // TODO! need to accumulate here otherwise gradient gets overwritten
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();
-        self.gradient = Some(LazyBuffer::without_parent(vec![
-            1.0;
-            self.buffer.get_size()
-        ]));
+        self.gradient = Some(LazyBuffer::scratch(vec![1.0; self.buffer.get_size()]));
         queue.push_back((
             self.clone(),
-            LazyBuffer::without_parent(vec![1.0; self.buffer.get_size()]),
+            LazyBuffer::scratch(vec![1.0; self.buffer.get_size()]),
         ));
 
         while let Some((curr_tensor, chain_rule_gradient)) = queue.pop_front() {
@@ -177,30 +173,28 @@ impl Tensor {
                         a_tensor.gradient = Some(chain_rule_gradient);
                         queue.push_back((a_tensor.clone(), chain_rule_gradient));
                         let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
-                        b_tensor.gradient =
-                            Some(LazyBuffer::from_operation_no_parent(LazyOp::Multiply(
-                                chain_rule_gradient,
-                                LazyBuffer::without_parent(vec![
-                                    -1.0;
-                                    chain_rule_gradient.get_size()
-                                ]),
-                            )));
+                        b_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
+                            chain_rule_gradient,
+                            LazyBuffer::scratch(vec![-1.0; chain_rule_gradient.get_size()]),
+                        )));
                         queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
                     });
                 }
                 LazyOp::Multiply(a, b) => {
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
-                            LazyOp::Multiply(b, chain_rule_gradient.clone()),
-                        ));
+                        a_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
+                            b,
+                            chain_rule_gradient.clone(),
+                        )));
                         queue.push_back((a_tensor.clone(), a_tensor.gradient.clone().unwrap()));
                     });
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
-                        b_tensor.gradient = Some(LazyBuffer::from_operation_no_parent(
-                            LazyOp::Multiply(a, chain_rule_gradient),
-                        ));
+                        b_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
+                            a,
+                            chain_rule_gradient,
+                        )));
                         queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
                     });
                 }
@@ -214,22 +208,6 @@ impl Tensor {
                 }
             }
         });
-    }
-    pub fn run_training_loop<F>(backend: &dyn Backend, iterations: usize, mut step_fn: F)
-    where
-        F: FnMut(usize) -> Tensor,
-    {
-        Tensor::begin_training_loop(backend);
-
-        for i in 0..iterations {
-            let mut result = step_fn(i);
-            result.realize(backend);
-            if i % 100 == 0 && i > 0 {
-                println!("Completed {} training iterations", i);
-            }
-        }
-
-        Tensor::end_training_loop(backend.name());
     }
 }
 impl Debug for Tensor {
