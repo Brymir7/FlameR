@@ -61,7 +61,7 @@ thread_local! {
 thread_local! {
     static  NEXT_BUFFER_ID: RefCell<usize> = RefCell::new(0);
 }
-// todo cache here all ::scratch buffers
+// todo cache here all ::scratch buffers, we can cache them and reuse them cause their data should be immutable
 thread_local! {
     static  SCRATCHPAD_CACHE: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new());
 }
