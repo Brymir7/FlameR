@@ -15,12 +15,10 @@ fn main() {
 
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
     for _ in 0..1 {
-        LazyBuffer::start_loop();
         let predictions = a * w;
         let mut loss = (target - predictions) * (target - predictions);
         loss.apply_backward(&vulkan_backend, 0.01);
         println!("A {:?}", a);
         println!("Loss: {:?}", loss.buffer.get_data(&vulkan_backend));
-        LazyBuffer::end_loop();
     }
 }

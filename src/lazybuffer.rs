@@ -87,7 +87,7 @@ impl LazyBuffer {
         });
         id
     }
-    pub fn without_parent(data: Vec<f32>) -> LazyBufferHandle {
+    pub fn scratch(data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
         let id = get_next_buffer_id();
         let buffer = LazyBuffer {
@@ -135,7 +135,7 @@ impl LazyBuffer {
         });
         id
     }
-    pub fn from_operation_no_parent(op: LazyOp) -> LazyBufferHandle {
+    pub fn scratch_op(op: LazyOp) -> LazyBufferHandle {
         let size = match &op {
             LazyOp::Creation(CreationType::RawData(data)) => data.len(),
             LazyOp::Clear(a) => {
