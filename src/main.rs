@@ -15,7 +15,7 @@ fn main() {
 
     let target = Tensor::without_grad(vec![2.0, 4.0, 6.0]);
 
-    for _ in 0..12 {
+    for _ in 0..35 {
         let predictions = a * w;
         let mut loss = (target - predictions) * (target - predictions);
         loss.buffer.realize(&vulkan_backend, false);

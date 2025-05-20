@@ -89,7 +89,7 @@ impl Tensor {
         let id = get_next_tensor_id();
         let t = Tensor {
             id,
-            buffer: LazyBuffer::from_operation(id, op),
+            buffer: LazyBuffer::from_tensor_op(id, op),
             gradient: None,
             requires_grad: true,
         };
@@ -177,7 +177,7 @@ impl Tensor {
                         if !a_tensor.requires_grad {
                             return;
                         }
-                        a_tensor.gradient = Some(LazyBuffer::from_operation(
+                        a_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                             a_tensor.id,
                             LazyOp::Memset(
                                 a_tensor
@@ -194,7 +194,7 @@ impl Tensor {
                         if !b_tensor.requires_grad {
                             return;
                         }
-                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                        b_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                             b_tensor.id,
                             LazyOp::Memset(
                                 b_tensor
@@ -210,7 +210,7 @@ impl Tensor {
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
                         if a_tensor.requires_grad {
-                            a_tensor.gradient = Some(LazyBuffer::from_operation(
+                            a_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                                 a_tensor.id,
                                 LazyOp::Memset(
                                     a_tensor.gradient.expect(
@@ -226,7 +226,7 @@ impl Tensor {
                         if !b_tensor.requires_grad {
                             return;
                         }
-                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                        b_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                             b_tensor.id,
                             LazyOp::Memset(
                                 b_tensor
@@ -247,7 +247,7 @@ impl Tensor {
                         if !a_tensor.requires_grad {
                             return;
                         }
-                        a_tensor.gradient = Some(LazyBuffer::from_operation(
+                        a_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                             a_tensor.id,
                             LazyOp::Memset(
                                 a_tensor
@@ -266,7 +266,7 @@ impl Tensor {
                         if !b_tensor.requires_grad {
                             return;
                         }
-                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                        b_tensor.gradient = Some(LazyBuffer::from_tensor_op(
                             b_tensor.id,
                             LazyOp::Memset(
                                 b_tensor

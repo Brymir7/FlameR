@@ -137,7 +137,6 @@ impl Backend for CPUBackend {
         let mut buffers = self.buffers.lock().unwrap();
         let b_data = buffers.get(&b.id).expect("Buffer B not found").clone();
         let a_data = buffers.get_mut(&a.id).expect("Buffer A not found");
-        a_data.clear();
         a_data.clone_from_slice(&b_data);
     }
     fn name(&self) -> &str {

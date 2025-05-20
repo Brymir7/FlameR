@@ -183,7 +183,7 @@ impl LazyBuffer {
 
         id
     }
-    pub fn from_operation(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
+    pub fn from_tensor_op(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
         let tensor_buffers = TENSOR_TO_BUFFERS.with_borrow(|cache| cache.get(&tensor_id).cloned());
         if let Some(tensor_buffers) = tensor_buffers {
             for buffer_handle in tensor_buffers {

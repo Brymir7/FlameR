@@ -170,7 +170,7 @@ impl VulkanBackend {
                 void main() {
                     uint idx = gl_GlobalInvocationID.x;
                     if (idx < push_constants.size) {
-                        tensorA.data[idx] = tensorB.data[0];
+                        tensorA.data[idx] = tensorB.data[idx];
                     }
                 }
                 "#
