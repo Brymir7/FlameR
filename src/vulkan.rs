@@ -587,10 +587,8 @@ impl VulkanBackend {
             self.device
                 .update_descriptor_sets(&write_descriptor_sets, &[]);
 
-            // Begin command buffer
             let command_buffer = self.begin_single_time_command();
 
-            // Bind pipeline and descriptor set
             self.device
                 .cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
             self.device.cmd_bind_descriptor_sets(
@@ -602,7 +600,6 @@ impl VulkanBackend {
                 &[],
             );
 
-            // Push constants
             self.device.cmd_push_constants(
                 command_buffer,
                 self.pipeline_layout,
@@ -611,12 +608,10 @@ impl VulkanBackend {
                 bytemuck::cast_slice(&[tensor_size]),
             );
 
-            // Dispatch compute shader
             let workgroup_size = 256;
             let dispatch_x = (tensor_size + workgroup_size - 1) / workgroup_size;
             self.device.cmd_dispatch(command_buffer, dispatch_x, 1, 1);
 
-            // End and submit command buffer
             self.end_single_time_command(command_buffer)
         }
     }

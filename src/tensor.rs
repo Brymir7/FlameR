@@ -33,18 +33,6 @@ impl Tensor {
     pub fn storage_len() -> usize {
         return TENSOR_REGISTRY.with_borrow(|r| r.len());
     }
-    pub fn begin_training_loop(backend: &dyn Backend) {
-        TENSOR_REGISTRY.with_borrow_mut(|r| {
-            for tensor in r.iter_mut() {
-                if tensor.requires_grad {
-                    tensor.gradient =
-                        Some(LazyBuffer::scratch(vec![0.0; tensor.buffer.get_size()]));
-                    tensor.gradient.as_ref().unwrap().realize(backend, false);
-                }
-                tensor.buffer.realize(backend, false);
-            }
-        });
-    }
 
     pub fn new(data: Vec<f32>) -> Self {
         let id = get_next_tensor_id();
@@ -73,6 +61,19 @@ impl Tensor {
         t
     }
 
+    pub fn prealloc_gradients(backend: &dyn Backend) {
+        TENSOR_REGISTRY.with_borrow_mut(|r| {
+            for tensor in r.iter_mut() {
+                if tensor.requires_grad && tensor.gradient.is_none() {
+                    tensor.gradient = Some(LazyBuffer::new(
+                        tensor.id,
+                        vec![0.0; tensor.buffer.get_size()],
+                    ));
+                    tensor.gradient.as_ref().unwrap().realize(backend, false);
+                }
+            }
+        });
+    }
     fn from_operation(op: LazyOp) -> Self {
         match op {
             LazyOp::Add(a, b)
@@ -159,61 +160,121 @@ impl Tensor {
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();
-        if self.gradient.is_none() {
-            self.gradient = Some(LazyBuffer::scratch(vec![0.0; self.buffer.get_size()]));
-        } else {
-            let grad_handle = self.gradient.as_ref().unwrap().get_device_handle().unwrap();
-            backend.to_device(&vec![0.0; self.buffer.get_size()], &grad_handle);
-        }
+        Self::prealloc_gradients(backend);
         queue.push_back((
             self.clone(),
             LazyBuffer::scratch(vec![1.0; self.buffer.get_size()]),
         ));
 
         while let Some((curr_tensor, chain_rule_gradient)) = queue.pop_front() {
-            if !curr_tensor.requires_grad {}
+            if !curr_tensor.requires_grad {
+                continue;
+            }
             match curr_tensor.buffer.get_op() {
                 LazyOp::Add(a, b) => {
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(chain_rule_gradient.clone());
+                        if !a_tensor.requires_grad {
+                            return;
+                        }
+                        a_tensor.gradient = Some(LazyBuffer::from_operation(
+                            a_tensor.id,
+                            LazyOp::Memset(
+                                a_tensor
+                                    .gradient
+                                    .expect("Requires grad requires gradient buffer preallocated"),
+                                chain_rule_gradient,
+                            ),
+                        ));
                         queue.push_back((a_tensor.clone(), chain_rule_gradient.clone()));
                     });
 
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
-                        b_tensor.gradient = Some(chain_rule_gradient.clone());
+                        if !b_tensor.requires_grad {
+                            return;
+                        }
+                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                            b_tensor.id,
+                            LazyOp::Memset(
+                                b_tensor
+                                    .gradient
+                                    .expect("Requires grad requires gradient buffer preallocated"),
+                                chain_rule_gradient,
+                            ),
+                        ));
                         queue.push_back((b_tensor.clone(), chain_rule_gradient));
                     });
                 }
                 LazyOp::Subtract(a, b) => {
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(chain_rule_gradient);
-                        queue.push_back((a_tensor.clone(), chain_rule_gradient));
+                        if a_tensor.requires_grad {
+                            a_tensor.gradient = Some(LazyBuffer::from_operation(
+                                a_tensor.id,
+                                LazyOp::Memset(
+                                    a_tensor.gradient.expect(
+                                        "Requires grad requires gradient buffer preallocated",
+                                    ),
+                                    chain_rule_gradient,
+                                ),
+                            ));
+                            queue.push_back((a_tensor.clone(), chain_rule_gradient));
+                        }
+
                         let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
-                        b_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
-                            chain_rule_gradient,
-                            LazyBuffer::scratch(vec![-1.0; chain_rule_gradient.get_size()]),
-                        )));
+                        if !b_tensor.requires_grad {
+                            return;
+                        }
+                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                            b_tensor.id,
+                            LazyOp::Memset(
+                                b_tensor
+                                    .gradient
+                                    .expect("Requires grad requires gradient buffer preallocated"),
+                                LazyBuffer::scratch_op(LazyOp::Multiply(
+                                    chain_rule_gradient,
+                                    LazyBuffer::scratch(vec![-1.0; chain_rule_gradient.get_size()]),
+                                )),
+                            ),
+                        ));
                         queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
                     });
                 }
                 LazyOp::Multiply(a, b) => {
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let a_tensor = &mut r[a.get_tensor_id().unwrap().0];
-                        a_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
-                            b,
-                            chain_rule_gradient.clone(),
-                        )));
+                        if !a_tensor.requires_grad {
+                            return;
+                        }
+                        a_tensor.gradient = Some(LazyBuffer::from_operation(
+                            a_tensor.id,
+                            LazyOp::Memset(
+                                a_tensor
+                                    .gradient
+                                    .expect("Requires grad requires gradient buffer preallocated"),
+                                LazyBuffer::scratch_op(LazyOp::Multiply(
+                                    b,
+                                    chain_rule_gradient.clone(),
+                                )),
+                            ),
+                        ));
                         queue.push_back((a_tensor.clone(), a_tensor.gradient.clone().unwrap()));
                     });
                     TENSOR_REGISTRY.with_borrow_mut(|r| {
                         let b_tensor = &mut r[b.get_tensor_id().unwrap().0];
-                        b_tensor.gradient = Some(LazyBuffer::scratch_op(LazyOp::Multiply(
-                            a,
-                            chain_rule_gradient,
-                        )));
+                        if !b_tensor.requires_grad {
+                            return;
+                        }
+                        b_tensor.gradient = Some(LazyBuffer::from_operation(
+                            b_tensor.id,
+                            LazyOp::Memset(
+                                b_tensor
+                                    .gradient
+                                    .expect("Requires grad requires gradient buffer preallocated"),
+                                LazyBuffer::scratch_op(LazyOp::Multiply(a, chain_rule_gradient)),
+                            ),
+                        ));
                         queue.push_back((b_tensor.clone(), b_tensor.gradient.clone().unwrap()));
                     });
                 }

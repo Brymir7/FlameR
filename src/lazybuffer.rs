@@ -1,6 +1,7 @@
 use core::panic;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::tensor::TensorId;
 
@@ -22,8 +23,52 @@ pub enum LazyOp {
     Subtract(LazyBufferHandle, LazyBufferHandle),
     Multiply(LazyBufferHandle, LazyBufferHandle),
     Divide(LazyBufferHandle, LazyBufferHandle),
+    Memset(LazyBufferHandle, LazyBufferHandle), // set A to B
 }
+fn calculate_op_hash(op: &LazyOp) -> Option<usize> {
+    let mut hasher = DefaultHasher::new();
 
+    match op {
+        LazyOp::Creation(_) => return None, // Don't cache creation ops
+        LazyOp::Clear(a) => {
+            a.0.hash(&mut hasher);
+            1_usize.hash(&mut hasher); // Operation type identifier
+        }
+        LazyOp::Add(a, b) => {
+            // Sort handles to ensure (a+b) and (b+a) hash the same
+            let (min, max) = if a.0 < b.0 { (a.0, b.0) } else { (b.0, a.0) };
+            min.hash(&mut hasher);
+            max.hash(&mut hasher);
+            2_usize.hash(&mut hasher);
+        }
+        LazyOp::Multiply(a, b) => {
+            // Sort handles to ensure (a*b) and (b*a) hash the same
+            let (min, max) = if a.0 < b.0 { (a.0, b.0) } else { (b.0, a.0) };
+            min.hash(&mut hasher);
+            max.hash(&mut hasher);
+            3_usize.hash(&mut hasher);
+        }
+        LazyOp::Subtract(a, b) => {
+            // Order matters for subtraction
+            a.0.hash(&mut hasher);
+            b.0.hash(&mut hasher);
+            4_usize.hash(&mut hasher);
+        }
+        LazyOp::Divide(a, b) => {
+            // Order matters for division
+            a.0.hash(&mut hasher);
+            b.0.hash(&mut hasher);
+            5_usize.hash(&mut hasher);
+        }
+        LazyOp::Memset(a, b) => {
+            a.0.hash(&mut hasher);
+            b.0.hash(&mut hasher);
+            6_usize.hash(&mut hasher);
+        }
+    }
+
+    Some(hasher.finish() as usize)
+}
 pub trait Backend {
     fn allocate_buffer(&self, lazy_buffer: LazyBufferHandle, size: usize) -> BufferHandle;
     fn allocate_temporary_buffer(&self, data: &[f32], size: usize) -> BufferHandle;
@@ -36,6 +81,7 @@ pub trait Backend {
     fn subtract(&self, a: &BufferHandle, b: &BufferHandle, result: &BufferHandle, size: usize);
     fn multiply(&self, a: &BufferHandle, b: &BufferHandle, result: &BufferHandle, size: usize);
     fn divide(&self, a: &BufferHandle, b: &BufferHandle, result: &BufferHandle, size: usize);
+    fn memset(&self, a: &BufferHandle, b: &BufferHandle, size: usize);
     fn name(&self) -> &str;
 }
 
@@ -45,10 +91,15 @@ pub struct BufferHandle {
     pub size: usize,
 }
 
+#[derive(Debug, Clone)]
+enum LazybufferType {
+    Scratch,
+    TensorData(TensorId),
+}
 #[derive(Clone)]
 pub struct LazyBuffer {
     pub id: LazyBufferHandle,
-    pub parent: Option<TensorId>,
+    pub kind: LazybufferType,
     pub size: usize,
     pub operation: LazyOp,
     pub device_buffer: Option<BufferHandle>,
@@ -65,9 +116,12 @@ thread_local! {
 thread_local! {
     static  SCRATCHPAD_CACHE: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new());
 }
+thread_local! {
+    static  SCRATCH_PAD_OP_CACHE: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new());
+}
 // todo cache all gradient overwrites here
 thread_local! {
-    static TENSOR_TO_GRADIENT_BUFFER: RefCell<HashMap<usize, LazyBufferHandle>> = RefCell::new(HashMap::new);
+    static TENSOR_TO_BUFFERS: RefCell<HashMap<TensorId, Vec<LazyBufferHandle>>> = RefCell::new(HashMap::new());
 }
 pub fn get_next_buffer_id() -> LazyBufferHandle {
     let id = NEXT_BUFFER_ID.with_borrow_mut(|id| {
@@ -77,7 +131,13 @@ pub fn get_next_buffer_id() -> LazyBufferHandle {
     });
     LazyBufferHandle(id)
 }
-
+fn calculate_data_hash(data: &[f32]) -> usize {
+    let mut hasher = DefaultHasher::new();
+    for value in data {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish() as usize
+}
 impl LazyBuffer {
     pub fn new(tensor_id: TensorId, data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
@@ -87,34 +147,71 @@ impl LazyBuffer {
             operation: LazyOp::Creation(CreationType::RawData(data.into_boxed_slice())),
             device_buffer: None,
             id,
-            parent: Some(tensor_id),
+            kind: LazybufferType::TensorData(tensor_id),
         };
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
             registry.push(buffer);
         });
         id
     }
+    // should be exclusively used for temporary buffers that are not directly linked to any tensor
     pub fn scratch(data: Vec<f32>) -> LazyBufferHandle {
         let size = data.len();
+        let data_hash = calculate_data_hash(&data);
+        let cached_handle = SCRATCHPAD_CACHE.with_borrow(|cache| cache.get(&data_hash).cloned());
+
+        if let Some(handle) = cached_handle {
+            return handle;
+        }
+
         let id = get_next_buffer_id();
         let buffer = LazyBuffer {
             size,
             operation: LazyOp::Creation(CreationType::RawData(data.into_boxed_slice())),
             device_buffer: None,
             id,
-            parent: None,
+            kind: LazybufferType::Scratch,
         };
+
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
             registry.push(buffer);
         });
+
+        SCRATCHPAD_CACHE.with_borrow_mut(|cache| {
+            cache.insert(data_hash, id);
+        });
+
         id
     }
     pub fn from_operation(tensor_id: TensorId, op: LazyOp) -> LazyBufferHandle {
+        let tensor_buffers = TENSOR_TO_BUFFERS.with_borrow(|cache| cache.get(&tensor_id).cloned());
+        if let Some(tensor_buffers) = tensor_buffers {
+            for buffer_handle in tensor_buffers {
+                if let Some(buffer) = LAZYBUFFER_REGISTRY
+                    .with_borrow(|registry| registry.get(buffer_handle.0).cloned())
+                {
+                    match (&buffer.operation, &op) {
+                        (LazyOp::Add(a1, b1), LazyOp::Add(a2, b2))
+                        | (LazyOp::Subtract(a1, b1), LazyOp::Subtract(a2, b2))
+                        | (LazyOp::Multiply(a1, b1), LazyOp::Multiply(a2, b2))
+                        | (LazyOp::Divide(a1, b1), LazyOp::Divide(a2, b2)) => {
+                            if (a1 == a2 && b1 == b2) {
+                                return buffer_handle;
+                            }
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    panic!("Invalid cache");
+                }
+            }
+        }
         let size = match &op {
             LazyOp::Add(a, b)
             | LazyOp::Subtract(a, b)
             | LazyOp::Multiply(a, b)
-            | LazyOp::Divide(a, b) => {
+            | LazyOp::Divide(a, b)
+            | LazyOp::Memset(a, b) => {
                 let a_size =
                     LAZYBUFFER_REGISTRY.with_borrow(|registry| registry.get(a.0).unwrap().size);
                 let b_size =
@@ -128,21 +225,51 @@ impl LazyBuffer {
                 panic!("Unsupported operation for size calculation: {:?}", op);
             }
         };
-        let id = get_next_buffer_id();
+        match &op {
+            LazyOp::Memset(a, b) => {
+                let buffer = LazyBuffer {
+                    size,
+                    operation: op.clone(),
+                    device_buffer: None,
+                    id: *a,
+                    kind: LazybufferType::TensorData(tensor_id),
+                };
+                LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+                    registry[a.0] = buffer;
+                });
+                return *a;
+            }
+            _ => {
+                let id = get_next_buffer_id();
+                let buffer = LazyBuffer {
+                    size,
+                    operation: op,
+                    device_buffer: None,
+                    id,
+                    kind: LazybufferType::TensorData(tensor_id),
+                };
 
-        let buffer = LazyBuffer {
-            size,
-            operation: op,
-            device_buffer: None,
-            id,
-            parent: Some(tensor_id),
+                LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
+                    registry.push(buffer);
+                });
+                TENSOR_TO_BUFFERS.with_borrow_mut(|cache| {
+                    cache
+                        .entry(tensor_id)
+                        .and_modify(|buffers| buffers.push(id))
+                        .or_insert_with(|| vec![id]);
+                });
+                return id;
+            }
         };
-        LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| {
-            registry.push(buffer);
-        });
-        id
     }
     pub fn scratch_op(op: LazyOp) -> LazyBufferHandle {
+        if let Some(op_hash) = calculate_op_hash(&op) {
+            if let Some(cached_handle) =
+                SCRATCH_PAD_OP_CACHE.with_borrow(|cache| cache.get(&op_hash).cloned())
+            {
+                return cached_handle;
+            }
+        }
         let size = match &op {
             LazyOp::Creation(CreationType::RawData(data)) => data.len(),
             LazyOp::Clear(a) => {
@@ -167,23 +294,29 @@ impl LazyBuffer {
                 panic!("Unsupported operation for size calculation: {:?}", op);
             }
         };
-
         let id = get_next_buffer_id();
 
         let buffer = LazyBuffer {
             size,
-            operation: op,
+            operation: op.clone(),
             device_buffer: None,
             id,
-            parent: None,
+            kind: LazybufferType::Scratch,
         };
 
         LAZYBUFFER_REGISTRY.with_borrow_mut(|registry| registry.push(buffer));
-
+        if let Some(op_hash) = calculate_op_hash(&op) {
+            SCRATCH_PAD_OP_CACHE.with_borrow_mut(|cache| {
+                cache.insert(op_hash, id);
+            });
+        }
         id
     }
     pub fn get_comp_graph_viz(&self) -> String {
         match &self.operation {
+            LazyOp::Memset(a, b) => {
+                format!("({}={})", a.get_comp_graph_viz(), b.get_comp_graph_viz())
+            }
             LazyOp::Creation(_) => format!("Data[{:?}]", self.id),
             LazyOp::Clear(_) => format!("Clear[{:?}]", self.id),
             LazyOp::Add(a, b) => format!("({}+{})", a.get_comp_graph_viz(), b.get_comp_graph_viz()),
@@ -224,6 +357,7 @@ impl LazyBuffer {
                 LazyOp::Add(a, b)
                 | LazyOp::Subtract(a, b)
                 | LazyOp::Multiply(a, b)
+                | LazyOp::Memset(a, b)
                 | LazyOp::Divide(a, b) => {
                     collect_recursive(*a, deps, visited);
                     collect_recursive(*b, deps, visited);
@@ -263,6 +397,9 @@ impl LazyBuffer {
                     | LazyOp::Multiply(a, b)
                     | LazyOp::Divide(a, b) => {
                         visit(*a, deps, temp_mark, perm_mark, result);
+                        visit(*b, deps, temp_mark, perm_mark, result);
+                    }
+                    LazyOp::Memset(_, b) => {
                         visit(*b, deps, temp_mark, perm_mark, result);
                     }
                 }
@@ -334,6 +471,11 @@ impl LazyBuffer {
                     let b_handle = buffer_handles.get(&b).unwrap();
                     backend.divide(a_handle, b_handle, result_handle, node.size);
                 }
+                LazyOp::Memset(a, b) => {
+                    let a_handle = buffer_handles.get(&a).unwrap();
+                    let b_handle = buffer_handles.get(&b).unwrap();
+                    backend.memset(a_handle, b_handle, node.size);
+                }
                 _ => {
                     panic!("Unsupported operation: {:?}", node.operation);
                 }
@@ -400,7 +542,10 @@ impl LazyBufferHandle {
     pub fn get_tensor_id(&self) -> Option<TensorId> {
         LAZYBUFFER_REGISTRY.with_borrow(|registry| {
             let buffer = registry.get(self.0).unwrap();
-            buffer.parent
+            match buffer.kind {
+                LazybufferType::Scratch => return None,
+                LazybufferType::TensorData(id) => return Some(id),
+            }
         })
     }
     pub fn get_device_handle(&self) -> Option<BufferHandle> {

@@ -146,7 +146,35 @@ impl VulkanBackend {
                 }
             "#
             }
-
+            "memset" => {
+                r#"
+                #version 450
+                layout(local_size_x = 256) in;
+                        
+                layout(push_constant) uniform PushConstants {
+                    uint size;
+                } push_constants;
+                        
+                layout(set = 0, binding = 0) buffer TensorA {
+                    float data[];
+                } tensorA;
+                        
+                layout(set = 0, binding = 1) buffer TensorB {
+                    float data[];
+                } tensorB;
+                        
+                layout(set = 0, binding = 2) buffer TensorResult {
+                    float data[];
+                } tensorResult;
+                        
+                void main() {
+                    uint idx = gl_GlobalInvocationID.x;
+                    if (idx < push_constants.size) {
+                        tensorA.data[idx] = tensorB.data[0];
+                    }
+                }
+                "#
+            }
             _ => panic!("Unknown operation: {}", operation),
         };
         let pipeline = self.vulkan.create_pipeline_for_shader(shader_src);
@@ -402,7 +430,34 @@ impl Backend for VulkanBackend {
             panic!("Buffer not found for division");
         }
     }
+    fn memset(&self, a: &BufferHandle, b: &BufferHandle, size: usize) {
+        let buffers = self.buffers.lock().unwrap();
+        if let (Some(buffer_a), Some(buffer_b)) = (buffers.get(&a.id), buffers.get(&b.id)) {
+            {
+                let pipelines = self.pipelines.lock().unwrap();
+                if !pipelines.contains_key("memset") {
+                    drop(pipelines);
+                    self.compile_shader_for_operation("memset");
+                }
+            }
 
+            let pipeline = {
+                let pipelines = self.pipelines.lock().unwrap();
+                *pipelines.get("memset").unwrap()
+            };
+
+            let fence = self.vulkan.execute_compute_with_pipeline(
+                buffer_a,
+                buffer_b,
+                buffer_a,
+                size as u32,
+                pipeline,
+            );
+            self.vulkan.wait_for_fence(fence);
+        } else {
+            panic!("Buffer not found for memset");
+        }
+    }
     fn name(&self) -> &str {
         &self.name
     }
