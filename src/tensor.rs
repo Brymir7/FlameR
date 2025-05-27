@@ -156,7 +156,7 @@ impl Tensor {
             }
         });
     }
-    // TODO! need to accumulate here otherwise gradient gets overwritten
+    // TODO! need to allow accumulate here otherwise gradient gets overwritten
     pub fn backward(&mut self, backend: &dyn Backend) {
         // currTensor, chainRule gradient
         let mut queue = VecDeque::<(Tensor, LazyBufferHandle)>::new();
